@@ -5,18 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0b0f14" />
   <title>uEye</title>
-  <!-- Tailwind (Play CDN) for the responsive layout. Component-level styling
-       (timeline, zone editor, player) and the JS-toggled state classes live in
-       style.css, so the UI still works if this CDN is ever unreachable. -->
-  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
-  <script>
-    tailwind.config = {
-      theme: { extend: { colors: {
-        bg: '#0b0f14', panel: '#121926', line: '#1f2a3a', fg: '#e8eef5',
-        muted: '#7d8da0', accent: '#2dd4bf', ok: '#34d399', off: '#5b6b7d',
-      }, maxWidth: { screen2k: '1700px' } } },
-    };
-  </script>
+  <!-- Tailwind, compiled locally at build time (web/src/input.css ->
+       web/tailwind.css via the standalone CLI in the Dockerfile): no runtime CDN,
+       works fully offline. Loaded before style.css so the hand-written component
+       styles win on any conflict. -->
+  <link rel="stylesheet" href="tailwind.css?v=15" />
   <link rel="stylesheet" href="style.css?v=15" />
   <!-- go2rtc web component: <video-stream> handles MSE/WebRTC fallback -->
   <script type="module" src="/go2rtc/video-stream.js"></script>

@@ -9,3 +9,6 @@ data/
 *.apk
 .playwright-mcp/
 /*.png
+
+# Tailwind output (generated at build time)
+web/tailwind.css

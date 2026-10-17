@@ -1,6 +1,6 @@
-# ipcamera - self-hosted XMEye replacement (live + recordings + config)
+# uEye - self-hosted XMEye replacement (live + recordings + config)
 # Single container, single web port (8080). Build for your NAS arch:
-#   docker build -t ipcamera .
+#   docker build -t ueye .
 FROM python:3.12-slim
 
 ARG GO2RTC_VERSION=1.9.9
@@ -38,8 +38,23 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 
 COPY backend/ backend/
 COPY web/ web/
-COPY Caddyfile run.sh ./
+COPY Caddyfile run.sh tailwind.config.js ./
 RUN chmod +x run.sh
+
+# Compile Tailwind to a local stylesheet (no runtime CDN; works offline).
+# Standalone CLI = one self-contained binary, no Node in the image.
+ARG TAILWIND_VERSION=3.4.16
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) T=linux-x64 ;; \
+      arm64) T=linux-arm64 ;; \
+      *) echo "unsupported arch $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /usr/local/bin/tailwindcss \
+      "https://github.com/tailwindlabs/tailwindcss/releases/download/v${TAILWIND_VERSION}/tailwindcss-${T}"; \
+    chmod +x /usr/local/bin/tailwindcss; \
+    tailwindcss -c tailwind.config.js -i web/src/input.css -o web/tailwind.css --minify; \
+    rm -f /usr/local/bin/tailwindcss
 
 EXPOSE 8080
 VOLUME ["/config"]
