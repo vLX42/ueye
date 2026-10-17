@@ -1,0 +1,224 @@
+:root {
+  /* Midnight Teal palette */
+  --bg: #0b0f14; --panel: #121926; --line: #1f2a3a;
+  --fg: #e8eef5; --muted: #7d8da0; --accent: #2dd4bf; --ok: #34d399; --off: #5b6b7d;
+  /* text that sits on a filled accent/ok button (needs dark ink for contrast) */
+  --on-accent: #04302b; --on-ok: #042a16; --danger: #f87171;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); }
+
+/* nav buttons (layout via Tailwind in the markup; state styling here so the
+   JS-toggled .active keeps working regardless of the CDN) */
+.nav-btn {
+  background: transparent; color: var(--muted); border: 0; padding: .5rem .8rem;
+  border-radius: 7px; cursor: pointer; font-size: .9rem;
+}
+.nav-btn:hover { color: var(--fg); }
+.nav-btn.active { background: var(--bg); color: var(--fg); }
+.status { font-size: .8rem; color: var(--muted); }
+
+.view { display: none; }
+.view.active { display: block; }
+.tile { background: #000; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; position: relative; aspect-ratio: 16/9; }
+.tile video-stream, .tile video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.tile .label {
+  position: absolute; left: 8px; bottom: 8px; font-size: .78rem;
+  background: rgba(0,0,0,.55); padding: 2px 8px; border-radius: 6px; color: #fff;
+}
+.talk-bar {
+  position: absolute; right: 8px; bottom: 8px; display: flex; gap: 6px;
+}
+.talk-btn {
+  width: 38px; height: 38px; padding: 0; font-size: 1.15rem; line-height: 1;
+  border: 1px solid rgba(255,255,255,.25); border-radius: 50%; cursor: pointer;
+  background: rgba(0,0,0,.55); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  -webkit-user-select: none; user-select: none; touch-action: none;
+  transition: transform .08s ease, background .15s ease;
+}
+.talk-btn:hover:not(:disabled) { background: rgba(0,0,0,.8); }
+.talk-btn:active:not(:disabled) { transform: scale(.92); }
+.talk-btn:disabled { opacity: .35; cursor: default; }
+.talk-btn.talk-active {
+  background: #d1491f; border-color: #ff7a4d; color: #fff;
+  box-shadow: 0 0 0 3px rgba(209,73,31,.35); animation: talk-pulse 1s infinite;
+}
+@keyframes talk-pulse { 50% { box-shadow: 0 0 0 7px rgba(209,73,31,0); } }
+
+.toolbar { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+select, input, button { font-size: .9rem; }
+select, input[type=date] {
+  background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 7px; padding: .4rem .6rem;
+}
+#rec-load, #rec-list button {
+  background: var(--accent); color: var(--on-accent); border: 0; border-radius: 7px;
+  padding: .45rem .9rem; cursor: pointer; font-weight: 600;
+}
+.rec-list, .motion-list { list-style: none; padding: 0; margin: 0; display: grid; gap: .4rem; }
+.rec-list li, .motion-list li {
+  display: flex; align-items: center; gap: 1rem; justify-content: space-between;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: .6rem .9rem;
+}
+.rec-list .meta { color: var(--muted); font-size: .82rem; }
+.hint { color: var(--muted); font-size: .85rem; }
+
+/* toggle */
+.switch { position: relative; width: 46px; height: 26px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; inset: 0; background: var(--off); border-radius: 26px; transition: .2s; cursor: pointer; }
+.slider::before { content: ""; position: absolute; height: 20px; width: 20px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .2s; }
+.switch input:checked + .slider { background: var(--ok); }
+.switch input:checked + .slider::before { transform: translateX(20px); }
+
+.empty { color: var(--muted); padding: 1rem 0; }
+
+/* motion zone editor */
+.toolbar label.inline { flex-direction: row; align-items: center; gap: .5rem; }
+#zone-all, #zone-clear, #zone-invert { background: var(--line); color: var(--fg); border: 0; border-radius: 7px; padding: .45rem .8rem; cursor: pointer; }
+.zone-stage { position: relative; display: inline-block; max-width: 960px; width: 100%; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; user-select: none; }
+#zone-img { display: block; width: 100%; aspect-ratio: 16/9; object-fit: cover; background: #000; }
+.zone-grid { position: absolute; inset: 0; display: grid; }
+.zcell { border: 0.5px solid rgba(255,255,255,.06); cursor: crosshair; }
+.zcell.on { background: rgba(45,212,191,.32); border-color: rgba(45,212,191,.55); }
+
+/* config editor (cfg-layout grid is Tailwind in the markup: stacks on mobile,
+   220px sidebar + content on large screens) */
+.cfg-sections { position: sticky; top: 70px; display: flex; flex-direction: column; gap: .15rem; }
+.cfg-group { color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .5px; margin: .8rem 0 .2rem; }
+.cfg-sec { text-align: left; background: transparent; color: var(--fg); border: 0; padding: .4rem .6rem; border-radius: 7px; cursor: pointer; font-size: .85rem; }
+.cfg-sec:hover { background: var(--panel); }
+.cfg-sec.active { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.cfg-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: .8rem; }
+.cfg-head h3 { margin: 0; font-size: 1rem; }
+.cfg-save { background: var(--ok); color: var(--on-ok); border: 0; border-radius: 8px; padding: .5rem 1rem; font-weight: 600; cursor: pointer; }
+.cfg-form { display: flex; flex-direction: column; gap: .5rem; }
+.cfg-field { display: flex; align-items: center; gap: .8rem; }
+.cfg-label { min-width: 190px; color: var(--muted); font-size: .82rem; }
+.cfg-input { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: .35rem .5rem; min-width: 220px; }
+.cfg-obj, .cfg-arr { border: 1px solid var(--line); border-radius: 9px; padding: .7rem .9rem; margin: .3rem 0; display: flex; flex-direction: column; gap: .45rem; }
+.cfg-obj legend, .cfg-arr legend { color: var(--accent); font-size: .8rem; padding: 0 .4rem; }
+.cfg-item > summary { cursor: pointer; color: var(--fg); font-size: .85rem; padding: .2rem 0; }
+.cfg-ro { color: var(--muted); }
+.cfg-input.bad { border-color: var(--off); outline: 1px solid var(--danger); }
+.cfg-sec.cfg-adv { font-size: .78rem; color: var(--muted); }
+.cfg-sec.cfg-adv:hover { color: var(--fg); }
+
+/* consolidated settings cards + conditional detail blocks */
+.set-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.1rem; margin-bottom: 1rem; }
+.set-card-title { margin: 0 0 .7rem; font-size: .95rem; color: var(--accent); }
+.set-detail { display: flex; flex-direction: column; gap: .5rem; }
+.toolbar button.ghost { background: var(--line); color: var(--fg); border: 0; border-radius: 7px; padding: .45rem .8rem; cursor: pointer; }
+
+/* ===== recordings: timeline ===== */
+.hidden { display: none !important; }
+.rec-toolbar { display: flex; align-items: center; gap: .9rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.rec-daynav { display: flex; align-items: center; gap: .35rem; }
+.rec-daynav button, .rec-zoom button {
+  background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 7px; padding: .4rem .6rem; cursor: pointer; font-size: .85rem; min-width: 34px;
+}
+.rec-daynav button:hover, .rec-zoom button:hover { border-color: var(--accent); }
+.rec-filters { display: flex; gap: .4rem; }
+.rec-chip {
+  display: flex; align-items: center; gap: .4rem; background: var(--panel);
+  color: var(--muted); border: 1px solid var(--line); border-radius: 20px;
+  padding: .3rem .7rem; cursor: pointer; font-size: .8rem;
+}
+.rec-chip.on { color: var(--fg); border-color: var(--accent); }
+.rec-chip i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; opacity: .55; }
+.rec-chip.on i { opacity: 1; }
+.rec-zoom { display: flex; gap: .3rem; }
+
+/* docked player */
+.rec-player { background: #000; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-bottom: 1rem; }
+.rec-video-box { position: relative; background: #000; display: flex; justify-content: center; }
+/* cap height so the player + timeline both stay on screen; letterbox if needed */
+#rec-video { width: 100%; max-height: 44vh; display: block; background: #000; object-fit: contain; }
+.rec-spinner { position: absolute; inset: 0; margin: auto; width: 42px; height: 42px; border: 4px solid rgba(255,255,255,.2); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.rec-pbar { display: flex; align-items: center; gap: .4rem; padding: .5rem .7rem; background: var(--panel); border-top: 1px solid var(--line); flex-wrap: wrap; }
+.pb-btn { background: var(--line); color: var(--fg); border: 0; border-radius: 7px; padding: .4rem .7rem; cursor: pointer; font-size: .82rem; text-decoration: none; }
+.pb-btn:hover { background: #24323f; }
+.pb-play { background: var(--accent); color: var(--on-accent); font-weight: 700; min-width: 42px; }
+.pb-time { font-variant-numeric: tabular-nums; color: var(--fg); font-size: .85rem; padding: 0 .3rem; }
+.pb-spacer { flex: 1; }
+.pb-speed { color: var(--muted); font-size: .78rem; display: flex; align-items: center; gap: .3rem; }
+.pb-qual { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.pb-q { background: var(--line); color: var(--muted); border: 0; padding: .4rem .6rem; cursor: pointer; font-size: .78rem; font-weight: 600; }
+.pb-q.on { background: var(--accent); color: var(--on-accent); }
+
+/* the timeline itself */
+.rec-timeline { position: relative; display: grid; grid-template-columns: 110px 1fr; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.tl-labels { display: flex; flex-direction: column; border-right: 1px solid var(--line); background: var(--panel); z-index: 3; }
+.tl-lab-spacer { height: 26px; border-bottom: 1px solid var(--line); }
+.tl-lab { height: 46px; display: flex; align-items: center; padding: 0 .7rem; font-size: .82rem; color: var(--fg); border-bottom: 1px solid var(--line); }
+.tl-lab:last-child { border-bottom: 0; }
+.tl-scroll { overflow-x: auto; overflow-y: hidden; }
+.tl-inner { position: relative; }
+.tl-ruler { position: relative; height: 26px; border-bottom: 1px solid var(--line); }
+.tl-tick { position: absolute; top: 6px; font-size: .68rem; color: var(--muted); transform: translateX(-50%); font-variant-numeric: tabular-nums; }
+.tl-tracks { position: relative; }
+.tl-row { position: relative; height: 46px; border-bottom: 1px solid var(--line); cursor: crosshair; }
+.tl-row:last-child { border-bottom: 0; }
+.tl-seg { position: absolute; top: 9px; height: 28px; border-radius: 3px; pointer-events: none; }
+.tl-seg.tl-motion, .tl-seg.tl-alarm { top: 6px; height: 34px; border-radius: 2px; box-shadow: 0 0 0 1px rgba(0,0,0,.3); }
+.tl-playhead { position: absolute; top: 26px; bottom: 0; width: 2px; background: var(--accent); box-shadow: 0 0 6px var(--accent); pointer-events: none; z-index: 4; }
+.tl-playhead::before { content: ""; position: absolute; top: -5px; left: -4px; border: 5px solid transparent; border-top-color: var(--accent); }
+.tl-hover { position: absolute; top: 26px; bottom: 0; width: 1px; background: rgba(255,255,255,.5); pointer-events: none; z-index: 4; }
+.tl-thumb { position: absolute; bottom: 8px; width: 170px; background: #000; border: 1px solid var(--accent); border-radius: 8px; overflow: hidden; z-index: 6; pointer-events: none; }
+.tl-thumb img { width: 100%; display: block; aspect-ratio: 16/9; object-fit: cover; }
+.tl-thumb span { display: block; font-size: .72rem; padding: 3px 6px; color: var(--fg); background: var(--panel); font-variant-numeric: tabular-nums; }
+
+/* event rail */
+.rec-events-title { font-size: .9rem; color: var(--accent); margin: 1.2rem 0 .5rem; }
+.rec-events { display: grid; grid-auto-flow: column; grid-auto-columns: 150px; gap: .6rem; overflow-x: auto; padding-bottom: .6rem; }
+.ev-card { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; overflow: hidden; cursor: pointer; }
+.ev-card:hover { border-color: var(--accent); }
+.ev-thumb { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: #000; display: block; }
+.ev-meta { padding: .35rem .5rem; display: flex; flex-direction: column; gap: .15rem; }
+.ev-meta strong { font-variant-numeric: tabular-nums; font-size: .82rem; }
+.ev-badge { align-self: flex-start; font-size: .62rem; text-transform: uppercase; letter-spacing: .4px; color: #fff; padding: 1px 6px; border-radius: 20px; }
+.ev-sub { color: var(--muted); font-size: .72rem; }
+
+/* horizontal-scroll areas: smooth momentum scrolling on touch */
+.tl-scroll, .rec-events { -webkit-overflow-scrolling: touch; }
+
+/* ===== mobile / small screens ===== */
+/* ===== phone / small screens =====
+   The header, nav, main and the live/settings grids are handled responsively by
+   Tailwind in the markup; what's left here is component-level tuning Tailwind
+   can't express (the timeline gutter, config fields, tap targets). */
+@media (max-width: 680px) {
+  .status { font-size: .72rem; }
+
+  /* settings sections become a scrollable chip row above the content */
+  .cfg-sections { position: static; flex-direction: row; flex-wrap: wrap; gap: .3rem; }
+  .cfg-field { flex-direction: column; align-items: stretch; gap: .25rem; }
+  .cfg-label { min-width: 0; }
+  .cfg-input { min-width: 0; width: 100%; }
+
+  /* slimmer timeline label gutter so the tracks get more room */
+  .rec-timeline { grid-template-columns: 64px 1fr; }
+  .tl-lab { padding: 0 .4rem; font-size: .72rem; }
+  .rec-toolbar { gap: .5rem; }
+
+  /* bigger tap targets for player controls */
+  .pb-btn, .pb-q { padding: .55rem .7rem; }
+  .tl-thumb { width: 130px; }
+
+  /* give live video a bit more height when it's the only tile */
+  #rec-video { max-height: 38vh; }
+}
+
+/* ===== people / faces ===== */
+.fx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: .7rem; margin-top: 1rem; }
+.fx-person { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; cursor: pointer; text-align: center; }
+.fx-person:hover { border-color: var(--accent); }
+.fx-avatar { width: 100%; aspect-ratio: 1/1; object-fit: cover; background: #000; display: block; }
+.fx-name { font-size: .82rem; padding: .35rem .3rem 0; font-variant-numeric: tabular-nums; }
+.fx-sub { font-size: .72rem; color: var(--muted); padding: 0 .3rem .4rem; }
+.fx-detail { margin-top: 1.4rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+.fx-detail .cfg-head { gap: .5rem; }

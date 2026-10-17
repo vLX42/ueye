@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0f14" />
+  <title>uEye</title>
+  <!-- Tailwind (Play CDN) for the responsive layout. Component-level styling
+       (timeline, zone editor, player) and the JS-toggled state classes live in
+       style.css, so the UI still works if this CDN is ever unreachable. -->
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <script>
+    tailwind.config = {
+      theme: { extend: { colors: {
+        bg: '#0b0f14', panel: '#121926', line: '#1f2a3a', fg: '#e8eef5',
+        muted: '#7d8da0', accent: '#2dd4bf', ok: '#34d399', off: '#5b6b7d',
+      }, maxWidth: { screen2k: '1700px' } } },
+    };
+  </script>
+  <link rel="stylesheet" href="style.css?v=15" />
+  <!-- go2rtc web component: <video-stream> handles MSE/WebRTC fallback -->
+  <script type="module" src="/go2rtc/video-stream.js"></script>
+</head>
+<body class="bg-bg text-fg min-h-screen">
+  <header class="sticky top-0 z-20 flex flex-wrap items-center gap-x-4 gap-y-2 bg-panel border-b border-line px-3 py-2 sm:px-4">
+    <h1 class="m-0 text-accent font-semibold tracking-wide text-base sm:text-lg">uEye</h1>
+    <nav class="order-3 w-full sm:order-none sm:w-auto flex gap-1">
+      <button data-view="live" class="nav-btn active flex-1 sm:flex-none">Live</button>
+      <button data-view="recordings" class="nav-btn flex-1 sm:flex-none">Recordings</button>
+      <button data-view="people" class="nav-btn flex-1 sm:flex-none">People</button>
+      <button data-view="settings" class="nav-btn flex-1 sm:flex-none">Settings</button>
+    </nav>
+    <span id="status" class="status order-2 sm:order-none ml-auto text-xs text-muted"></span>
+  </header>
+
+  <main class="p-3 sm:p-4 lg:p-6 mx-auto w-full max-w-screen2k">
+    <section id="live" class="view active">
+      <div id="grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-2 sm:gap-3"></div>
+    </section>
+
+    <section id="recordings" class="view">
+      <div class="rec-toolbar">
+        <div class="rec-daynav">
+          <button id="rec-prev" title="Previous day">◀</button>
+          <input type="date" id="rec-date" />
+          <button id="rec-next" title="Next day">▶</button>
+          <button id="rec-today">Today</button>
+        </div>
+        <div id="rec-filters" class="rec-filters"></div>
+        <div class="rec-zoom">
+          <button id="rec-zoomout" title="Zoom out">−</button>
+          <button id="rec-zoomin" title="Zoom in">+</button>
+          <button id="rec-fit" title="Fit whole day">Fit</button>
+        </div>
+        <span id="rec-summary" class="status"></span>
+      </div>
+
+      <div id="rec-player" class="rec-player hidden">
+        <div class="rec-video-box">
+          <video id="rec-video" playsinline></video>
+          <div id="rec-spinner" class="rec-spinner hidden"></div>
+        </div>
+        <div class="rec-pbar">
+          <button id="pb-play" class="pb-btn pb-play" title="Play / pause">▶</button>
+          <button id="pb-back" class="pb-btn" title="Back 10s">↺10</button>
+          <button id="pb-fwd" class="pb-btn" title="Forward 10s">10↻</button>
+          <span id="pb-time" class="pb-time">--:--:--</span>
+          <span class="pb-spacer"></span>
+          <button id="pb-prevev" class="pb-btn" title="Previous event">◀ event</button>
+          <button id="pb-nextev" class="pb-btn" title="Next event">event ▶</button>
+          <span class="pb-qual" title="Playback quality (SD is lighter — good for remote viewing)">
+            <button id="pb-sd" class="pb-q on">SD</button><button id="pb-hd" class="pb-q">HD</button>
+          </span>
+          <label class="pb-speed">Speed
+            <select id="pb-rate">
+              <option value="0.5">0.5×</option>
+              <option value="1" selected>1×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+            </select>
+          </label>
+          <a id="pb-dl" class="pb-btn" title="Download the original hour (4K HEVC)" download>⭳</a>
+          <button id="pb-full" class="pb-btn" title="Fullscreen">⛶</button>
+          <button id="pb-close" class="pb-btn" title="Close player">✕</button>
+        </div>
+      </div>
+
+      <div id="rec-timeline" class="rec-timeline">
+        <div id="tl-labels" class="tl-labels"></div>
+        <div id="tl-scroll" class="tl-scroll">
+          <div id="tl-inner" class="tl-inner">
+            <div id="tl-ruler" class="tl-ruler"></div>
+            <div id="tl-tracks" class="tl-tracks"></div>
+            <div id="tl-playhead" class="tl-playhead hidden"></div>
+            <div id="tl-hover" class="tl-hover hidden"></div>
+          </div>
+        </div>
+        <div id="tl-thumb" class="tl-thumb hidden">
+          <img id="tl-thumb-img" alt="" />
+          <span id="tl-thumb-time"></span>
+        </div>
+      </div>
+
+      <h3 class="rec-events-title">Motion &amp; alarm events</h3>
+      <div id="rec-events" class="rec-events"><p class="empty">Pick a day to see events.</p></div>
+    </section>
+
+    <section id="people" class="view">
+      <div class="rec-toolbar">
+        <div class="rec-daynav">
+          <input type="date" id="fx-date" />
+          <button id="fx-index" class="pb-btn">Scan this day for faces</button>
+        </div>
+        <span id="fx-status" class="status"></span>
+      </div>
+      <p class="hint">Faces are detected from motion events and grouped by person (runs on the NAS, CPU only). Click a person to see every sighting; click a sighting to jump to that moment in Recordings.</p>
+      <div id="fx-people" class="fx-grid"><p class="empty">No people yet. Scan a day to start.</p></div>
+      <div id="fx-detail" class="fx-detail hidden"></div>
+    </section>
+
+    <section id="settings" class="view">
+      <div class="cfg-layout grid grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)] gap-4 items-start">
+        <aside id="set-nav" class="cfg-sections"><p class="empty">Loading…</p></aside>
+        <div id="set-body" class="cfg-editor"><p class="empty">Select a camera or a settings group on the left.</p></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js?v=15"></script>
+</body>
+</html>

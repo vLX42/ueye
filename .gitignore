@@ -1,0 +1,11 @@
+extracted/
+__pycache__/
+*.pyc
+.venv/
+config.yaml
+data/
+.venv*/
+*.apkm
+*.apk
+.playwright-mcp/
+/*.png

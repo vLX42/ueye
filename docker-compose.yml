@@ -1,0 +1,14 @@
+services:
+  ipcamera:
+    build: .
+    image: ipcamera:latest
+    container_name: ipcamera
+    restart: unless-stopped
+    ports:
+      - "8080:8080"       # web UI  ->  http://<nas-ip>:8080
+      - "8555:8555"       # WebRTC (optional, lower-latency live); MSE works without it
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+    # The NVR is reached on your LAN; no special network mode needed as long as
+    # the NAS can route to the NVR's IP. For LAN multicast discovery you could
+    # use network_mode: host, but it isn't required here.

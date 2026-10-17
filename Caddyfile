@@ -1,0 +1,27 @@
+# Single front door. Everything on one port (8080 inside the container).
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	encode gzip
+
+	# REST API -> FastAPI (uvicorn)
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# Live video (MSE / WebRTC / HLS + WebSocket signalling) -> go2rtc
+	handle_path /go2rtc/* {
+		reverse_proxy 127.0.0.1:1984
+	}
+
+	# Static web UI
+	handle {
+		root * /app/web
+		try_files {path} /index.html
+		header Cache-Control "no-store"
+		file_server
+	}
+}

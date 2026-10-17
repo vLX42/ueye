@@ -1,0 +1,13 @@
+# Copy to config.yaml and edit. Mounted at /config/config.yaml in the container.
+nvr:
+  host: 192.168.1.50      # your NVR's LAN IP
+  port: 34567             # DVRIP port (default 34567)
+  username: admin
+  password: ""            # your NVR password
+
+# One entry per camera channel you want to see. id is the NVR channel (0-based).
+channels:
+  - { id: 0, name: "Front door" }
+  - { id: 1, name: "Driveway" }
+  - { id: 2, name: "Garden" }
+  - { id: 3, name: "Garage" }
