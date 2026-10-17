@@ -1,9 +1,19 @@
 # uEye
 
 A self-hosted replacement for the XMEye app for Xiongmai-family NVRs/DVRs.
-One Docker container, one web port, no vendor cloud. Live grid, recordings
-browser, and camera/motion-detection config — all by talking the device's own
-LAN protocol (DVRIP / "Sofia", TCP 34567).
+One Docker container, one web port, no vendor cloud. Live grid, a recordings
+timeline with in-browser playback, face sorting, two-way talk to the cameras,
+and camera/motion-detection config — all by talking the device's own LAN
+protocol (DVRIP / "Sofia", TCP 34567). Responsive: works on phone, tablet and
+desktop.
+
+## Screenshots
+
+| Recordings timeline | In-browser playback |
+| --- | --- |
+| ![Recordings timeline with motion events](docs/recordings.png) | ![Playback of a recording](docs/playback.png) |
+
+<p><img src="docs/mobile.png" width="320" alt="uEye on a phone" /></p>
 
 ## Why this design
 
@@ -38,9 +48,8 @@ For now this runs LAN-only on a port.
 
 DVRIP LAN login uses the **device-local user**, not your XMEye *cloud* account.
 On these recorders that's almost always `admin` plus the password set on the box
-itself. Your cloud username (e.g. `Vlx42`) is for the P2P path we don't use — it
-will **not** work for the LAN login. Put the device-local credentials in
-`config.yaml`.
+itself. Your XMEye *cloud* username is for the P2P path we don't use — it will
+**not** work for the LAN login. Put the device-local credentials in `config.yaml`.
 
 How login works: TCP connect to `:34567`, send a `LOGIN_REQ` (id 1000) with
 `{"EncryptType":"MD5","LoginType":"DVRIP-Web","UserName":...,"PassWord":<sofia-hash>}`,
@@ -60,26 +69,29 @@ see `backend/dvrip.py` (verified against the canonical `""` → `tlJwpbo6`).
    mount your `config.yaml` at `/config/config.yaml`.)
 3. Open `http://<nas-ip>:8080`.
 
-## What's verified vs. needs your NVR
+## What works
 
-Verified offline on this machine:
-- Sofia login-hash algorithm (canonical vector) and DVRIP packet framing — unit tests in `backend/tests/`.
-- Config loading and go2rtc config generation from `config.yaml`.
-- FastAPI routes; graceful 502/504 when the NVR is unreachable.
-- Docker image builds; container boots go2rtc + API + Caddy; UI, `/api/*`,
-  and `/go2rtc/*` all serve through the single port; all channels registered.
+Confirmed against a real recorder (Xiongmai NBD80S16S-KL):
+- DVRIP login, live video in the grid, recording search + in-browser playback
+  (seek by time, SD/HD, speed, per-event jump).
+- Two-way talk to the PoE cameras, including the across-IPC path a camera behind
+  the NVR needs. Motion-detect config round-trip.
+- Face detection from motion events, grouped by person (CPU-only, runs on the NAS).
 
-Needs your NVR on the LAN to confirm (can't be tested without the device):
-- DVRIP login against the real recorder.
-- Live video actually decoding in the grid.
-- Recording search returning real files, and playback.
-- Motion-detect config round-trip (the `Detect.MotionDetect` shape varies by firmware).
+Verified offline (unit tests in `backend/tests/`):
+- Sofia login-hash algorithm (canonical vector) and DVRIP packet framing.
+- Config loading and go2rtc config generation; FastAPI routes with graceful
+  502/504 when the NVR is unreachable.
+
+Note: the `Detect.MotionDetect` config shape varies by firmware; it's handled
+generically but your box may differ.
 
 ## Layout
 
 ```
 backend/dvrip.py      DVRIP protocol client (login, config, file search)
-backend/main.py       FastAPI: /api/health /system /recordings /config /motion
+backend/main.py       FastAPI: /api/health /system /recordings /config /motion /talk /faces
+backend/audiogen.py   talk audio: G.711 a-law encode + synthesized sounds
 backend/config.py     config.yaml loader
 backend/go2rtc_gen.py generates go2rtc.yaml (dvrip:// per channel)
 backend/tests/        offline protocol tests
@@ -90,6 +102,6 @@ Dockerfile docker-compose.yml
 
 ## Roadmap
 
-- Recording playback in the browser (DVRIP download-by-time → fMP4), currently list-only.
 - PTZ controls (protocol primitive `DevPtzControl` / id 1400 is confirmed present).
-- Snapshots and a motion-event feed (alarm channel, id 1504).
+- Snapshots and a live motion-event feed (alarm channel, id 1504).
+- Per-camera alarm/siren trigger.
