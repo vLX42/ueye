@@ -494,9 +494,17 @@ async function indexFaces() {
 }
 
 // --- live grid --------------------------------------------------------------
-function renderGrid() {
+let gridGen = 0;
+async function renderGrid() {
   const grid = $('#grid');
   grid.innerHTML = '';
+  const gen = ++gridGen;
+  // video-stream.js is a module (deferred), so on first load app.js can get here
+  // before the element is defined. Setting .src on a not-yet-upgraded element
+  // creates an own property that shadows the component's setter: no WebSocket
+  // ever opens and the tile stays black. Wait for the definition first.
+  await customElements.whenDefined('video-stream');
+  if (gen !== gridGen) return;  // stopGrid/renderGrid ran while we waited
   for (const ch of CHANNELS) {
     const tile = document.createElement('div');
     tile.className = 'tile';
@@ -647,6 +655,7 @@ function wirePushToTalk(btn, channel) {
 // Remove the live tiles -> each <video-stream>'s disconnectedCallback closes its
 // go2rtc WebSocket, stopping the decode and releasing the NVR stream slot.
 function stopGrid() {
+  gridGen++;
   const grid = $('#grid');
   if (grid) grid.innerHTML = '';
 }
