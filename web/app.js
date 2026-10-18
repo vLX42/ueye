@@ -578,16 +578,17 @@ function buildTalkBar(channel) {
 let stopActiveTalk = null;   // set while a push-to-talk session runs
 
 // Mute every live tile while talking, else the camera mic picks up its own
-// speaker and it loops back through ours (echo). Restores each tile's state.
+// speaker and it loops back through ours (echo). On release the camera we
+// talked to is unmuted (to hear the reply); the others get their state back.
 let talkMuted = null;
 function muteLive() {
   if (talkMuted) return;
   talkMuted = $$('#grid video').map(v => [v, v.muted]);
   talkMuted.forEach(([v]) => { v.muted = true; });
 }
-function unmuteLive() {
+function unmuteLive(replyVideo) {
   if (!talkMuted) return;
-  talkMuted.forEach(([v, was]) => { if (v.isConnected) v.muted = was; });
+  talkMuted.forEach(([v, was]) => { if (v.isConnected) v.muted = v === replyVideo ? false : was; });
   talkMuted = null;
 }
 
@@ -675,7 +676,7 @@ function wirePushToTalk(btn, channel) {
     try { cur.ctx && cur.ctx.close(); } catch {}
     try { cur.stream && cur.stream.getTracks().forEach(t => t.stop()); } catch {}
     try { cur.ws && cur.ws.readyState <= 1 && cur.ws.close(); } catch {}
-    unmuteLive();
+    unmuteLive(btn.closest('.tile')?.querySelector('video'));
     btn.classList.remove('talk-active');
     setTalkBusy(false);
     if ($('#status').textContent.startsWith('Talking to')) setStatus('');  // keep error messages
