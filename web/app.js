@@ -578,83 +578,112 @@ function buildTalkBar(channel) {
 // 8 kHz 16-bit PCM and stream it over a WebSocket; the backend a-law encodes
 // and pushes it to the camera. Needs a secure context (https or localhost) for
 // getUserMedia — over plain http on a LAN IP the browser blocks the mic.
-function wirePushToTalk(btn, channel) {
-  let active = false, ws = null, ctx = null, stream = null, node = null, src = null;
+let stopActiveTalk = null;   // set while a push-to-talk session runs
 
-  async function start(ev) {
+function wirePushToTalk(btn, channel) {
+  // One object per press. Every await re-checks `s.live`, so letting go while
+  // the mic prompt / WebSocket is still starting tears down whatever came up
+  // afterwards instead of leaving the mic streaming.
+  let s = null;
+
+  function start(ev) {
     ev.preventDefault();
-    if (active || TALK_BUSY) return;
+    if (s || TALK_BUSY) return;
     if (!navigator.mediaDevices?.getUserMedia) {
       setStatus('Mic needs https (or localhost). Open the UI over https to talk.', true);
       return;
     }
-    active = true;
+    // keep receiving pointerup even if the finger/cursor drifts off the button
+    try { btn.setPointerCapture(ev.pointerId); } catch {}
+    s = { live: true, ws: null, ctx: null, stream: null, node: null, src: null, queue: [] };
+    stopActiveTalk = stop;
     setTalkBusy(true);
     btn.classList.add('talk-active');
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
-      });
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      ws = new WebSocket(`${proto}://${location.host}/api/talk/ws/${channel}`);
-      ws.binaryType = 'arraybuffer';
-      await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
-      ws.onclose = () => stop();
-
-      ctx = new (window.AudioContext || window.webkitAudioContext)();
-      src = ctx.createMediaStreamSource(stream);
-      node = ctx.createScriptProcessor(2048, 1, 1);
-      const ratio = ctx.sampleRate / 8000;
-      node.onaudioprocess = (e) => {
-        if (!ws || ws.readyState !== 1) return;
-        const inp = e.inputBuffer.getChannelData(0);
-        // decimate input rate -> 8 kHz with a simple box average
-        const outLen = Math.floor(inp.length / ratio);
-        const pcm = new Int16Array(outLen);
-        for (let i = 0; i < outLen; i++) {
-          const from = Math.floor(i * ratio), to = Math.floor((i + 1) * ratio);
-          let acc = 0, n = 0;
-          for (let j = from; j < to && j < inp.length; j++) { acc += inp[j]; n++; }
-          let s = n ? acc / n : 0;
-          s = Math.max(-1, Math.min(1, s));
-          pcm[i] = s < 0 ? s * 32768 : s * 32767;
-        }
-        ws.send(pcm.buffer);
-      };
-      src.connect(node);
-      node.connect(ctx.destination);
-      setStatus(`Talking to ${chName(channel)}…`);
-    } catch (e) {
-      setStatus(`Talk failed: ${e.message || e}`, true);
+    setStatus(`Talking to ${chName(channel)}…`);
+    // Create the AudioContext synchronously inside the gesture: iOS Safari
+    // leaves one created after an await suspended (silent).
+    s.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    s.ctx.resume?.();
+    run(s).catch(e => {
+      if (s?.live) setStatus(`Talk failed: ${e.message || e}`, true);
       stop();
-    }
+    });
+  }
+
+  async function run(cur) {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    // open the socket and the mic in parallel; audio is queued until the socket is up
+    cur.ws = new WebSocket(`${proto}://${location.host}/api/talk/ws/${channel}`);
+    cur.ws.binaryType = 'arraybuffer';
+    cur.ws.onclose = e => {
+      if (cur.live && e.code === 1013) setStatus('Talk is busy on another camera', true);
+      if (cur === s) stop();
+    };
+    cur.ws.onopen = () => { for (const b of cur.queue) cur.ws.send(b); cur.queue = []; };
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    });
+    if (!cur.live) { stream.getTracks().forEach(t => t.stop()); return; }
+    cur.stream = stream;
+
+    const ctx = cur.ctx;
+    cur.src = ctx.createMediaStreamSource(stream);
+    cur.node = ctx.createScriptProcessor(2048, 1, 1);
+    const ratio = ctx.sampleRate / 8000;
+    cur.node.onaudioprocess = (e) => {
+      if (!cur.live) return;
+      const inp = e.inputBuffer.getChannelData(0);
+      // decimate input rate -> 8 kHz with a simple box average
+      const outLen = Math.floor(inp.length / ratio);
+      const pcm = new Int16Array(outLen);
+      for (let i = 0; i < outLen; i++) {
+        const from = Math.floor(i * ratio), to = Math.floor((i + 1) * ratio);
+        let acc = 0, n = 0;
+        for (let j = from; j < to && j < inp.length; j++) { acc += inp[j]; n++; }
+        let v = n ? acc / n : 0;
+        v = Math.max(-1, Math.min(1, v));
+        pcm[i] = v < 0 ? v * 32768 : v * 32767;
+      }
+      if (cur.ws.readyState === 1) cur.ws.send(pcm.buffer);
+      else if (cur.ws.readyState === 0) cur.queue.push(pcm.buffer);
+    };
+    cur.src.connect(cur.node);
+    cur.node.connect(ctx.destination);
   }
 
   function stop() {
-    if (!active) return;
-    active = false;
-    try { node && node.disconnect(); } catch {}
-    try { src && src.disconnect(); } catch {}
-    try { ctx && ctx.close(); } catch {}
-    try { stream && stream.getTracks().forEach(t => t.stop()); } catch {}
-    try { ws && ws.readyState <= 1 && ws.close(); } catch {}
-    node = src = ctx = stream = ws = null;
+    const cur = s;
+    if (!cur) return;
+    s = null;
+    cur.live = false;
+    if (stopActiveTalk === stop) stopActiveTalk = null;
+    try { cur.node && cur.node.disconnect(); } catch {}
+    try { cur.src && cur.src.disconnect(); } catch {}
+    try { cur.ctx && cur.ctx.close(); } catch {}
+    try { cur.stream && cur.stream.getTracks().forEach(t => t.stop()); } catch {}
+    try { cur.ws && cur.ws.readyState <= 1 && cur.ws.close(); } catch {}
     btn.classList.remove('talk-active');
     setTalkBusy(false);
-    setStatus('');
+    if ($('#status').textContent.startsWith('Talking to')) setStatus('');  // keep error messages
   }
 
-  // hold to talk: pointer events cover mouse + touch; release/leave/cancel stops
+  // Hold to talk: talks only while pressed (mouse or finger). With pointer
+  // capture, release anywhere ends it; cancel covers the OS stealing the touch.
   btn.addEventListener('pointerdown', start);
   btn.addEventListener('pointerup', stop);
-  btn.addEventListener('pointerleave', stop);
   btn.addEventListener('pointercancel', stop);
+  btn.addEventListener('lostpointercapture', stop);
   btn.addEventListener('contextmenu', e => e.preventDefault());  // long-press menu
 }
+// Never keep the mic open when the page is hidden or loses focus mid-press.
+window.addEventListener('blur', () => stopActiveTalk?.());
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopActiveTalk?.(); });
 
 // Remove the live tiles -> each <video-stream>'s disconnectedCallback closes its
 // go2rtc WebSocket, stopping the decode and releasing the NVR stream slot.
 function stopGrid() {
+  stopActiveTalk?.();
   gridGen++;
   const grid = $('#grid');
   if (grid) grid.innerHTML = '';
