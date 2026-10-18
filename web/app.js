@@ -512,9 +512,6 @@ async function renderGrid() {
     const vs = document.createElement('video-stream');
     // MSE first: streams reliably over the single proxied TCP port. WebRTC as fallback.
     vs.setAttribute('mode', 'mse,webrtc,mp4');
-    // Video only in the grid: no audio means the browser autoplays without a
-    // user gesture (Chrome blocks autoplay of streams that carry audio).
-    vs.setAttribute('media', 'video');
     // the component expects a WebSocket URL to go2rtc's api
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     // Grid uses the sub (low-res) stream: the NVR allows many more concurrent
@@ -580,6 +577,20 @@ function buildTalkBar(channel) {
 // getUserMedia — over plain http on a LAN IP the browser blocks the mic.
 let stopActiveTalk = null;   // set while a push-to-talk session runs
 
+// Mute every live tile while talking, else the camera mic picks up its own
+// speaker and it loops back through ours (echo). Restores each tile's state.
+let talkMuted = null;
+function muteLive() {
+  if (talkMuted) return;
+  talkMuted = $$('#grid video').map(v => [v, v.muted]);
+  talkMuted.forEach(([v]) => { v.muted = true; });
+}
+function unmuteLive() {
+  if (!talkMuted) return;
+  talkMuted.forEach(([v, was]) => { if (v.isConnected) v.muted = was; });
+  talkMuted = null;
+}
+
 function wirePushToTalk(btn, channel) {
   // One object per press. Every await re-checks `s.live`, so letting go while
   // the mic prompt / WebSocket is still starting tears down whatever came up
@@ -597,6 +608,7 @@ function wirePushToTalk(btn, channel) {
     try { btn.setPointerCapture(ev.pointerId); } catch {}
     s = { live: true, ws: null, ctx: null, stream: null, node: null, src: null, queue: [] };
     stopActiveTalk = stop;
+    muteLive();
     setTalkBusy(true);
     btn.classList.add('talk-active');
     setStatus(`Talking to ${chName(channel)}…`);
@@ -663,6 +675,7 @@ function wirePushToTalk(btn, channel) {
     try { cur.ctx && cur.ctx.close(); } catch {}
     try { cur.stream && cur.stream.getTracks().forEach(t => t.stop()); } catch {}
     try { cur.ws && cur.ws.readyState <= 1 && cur.ws.close(); } catch {}
+    unmuteLive();
     btn.classList.remove('talk-active');
     setTalkBusy(false);
     if ($('#status').textContent.startsWith('Talking to')) setStatus('');  // keep error messages
