@@ -980,7 +980,14 @@ function bindPlayer() {
     $('#pb-' + q).classList.toggle('on', REC.quality === q);
     $('#pb-' + q).onclick = () => setQuality(q);
   }
-  $('#pb-full').onclick = () => { const b = $('.rec-video-box'); (b.requestFullscreen || b.webkitRequestFullscreen).call(b); };
+  $('#pb-full').onclick = () => {
+    const b = $('.rec-video-box');
+    if (document.fullscreenElement || document.webkitFullscreenElement)
+      return (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    const req = b.requestFullscreen || b.webkitRequestFullscreen;
+    if (req) req.call(b);
+    else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();   // iPhone: video only
+  };
   $('#pb-close').onclick = () => {
     v.pause(); v.removeAttribute('src'); v.load();
     $('#rec-player').classList.add('hidden'); REC.play.ch = null; positionPlayhead();
