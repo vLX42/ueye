@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 import asyncio
 import hashlib
+import queue
 import socket
 import threading
 import time
@@ -145,12 +146,13 @@ def _ffmpeg_stream(es: bytes, codec: str, scale: int, preset: str, cache: Path, 
 
 
 def _ffmpeg_pipe(dl, demux, first: bytes, codec: str, scale: int, preset: str,
-                 cache: Path, trim: float, client, sem):
+                 cache: Path, trim: float, client, sem, stop_at: datetime | None = None):
     """Transcode a LIVE download to fragmented MP4. `first` is the already-demuxed
     opening NALs (used to pick the input format); the rest is demuxed from `dl` as
     it streams in and fed to ffmpeg, so output starts without waiting for the whole
     slice. Owns the NVR client and the concurrency slot: both are released when the
-    stream ends or the client disconnects."""
+    stream ends or the client disconnects. With stop_at, the download ends at the
+    first I-frame stamped at/after it instead of waiting for the idle timeout."""
     in_fmt = "hevc" if codec == "hevc" else "h264"
     ss = ["-ss", f"{trim:.3f}"] if trim > 0 else []
     vf = ["-vf", f"scale='min({scale},iw)':-2"] if scale else []
@@ -161,11 +163,35 @@ def _ffmpeg_pipe(dl, demux, first: bytes, codec: str, scale: int, preset: str,
             "-an", "-f", "mp4", "pipe:1"]
     proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL)
+    # The NVR stops sending if we fall behind, and the idle timeout then reads
+    # that as end-of-stream. 4K HEVC decodes slower than real time on the NAS, so
+    # writing to ffmpeg must never stall the socket: drain the download in its own
+    # thread into an unbounded queue (a 20s chunk is ~10 MB) and feed from there.
+    q: queue.Queue = queue.Queue()
+
+    def pull():
+        tail = b""
+        try:
+            for body in dl:
+                q.put(body)
+                if stop_at:
+                    t = sofia.last_iframe_time(tail + body)
+                    if t and t >= stop_at:
+                        break
+                    tail = body[-15:]
+        except Exception:
+            pass
+        finally:
+            q.put(None)
+            try: dl.close()           # unwind the generator -> release socket lock
+            except Exception: pass
+            try: client.close()
+            except Exception: pass
 
     def feed():
         try:
             proc.stdin.write(first)
-            for body in dl:
+            while (body := q.get()) is not None:
                 a = demux.feed(body)
                 if a:
                     proc.stdin.write(a)
@@ -177,11 +203,8 @@ def _ffmpeg_pipe(dl, demux, first: bytes, codec: str, scale: int, preset: str,
         finally:
             try: proc.stdin.close()
             except Exception: pass
-            try: dl.close()           # unwind the generator -> release socket lock
-            except Exception: pass
-            try: client.close()
-            except Exception: pass
 
+    threading.Thread(target=pull, daemon=True).start()
     threading.Thread(target=feed, daemon=True).start()
     tmp = cache.with_suffix(".part")
 
@@ -196,7 +219,8 @@ def _ffmpeg_pipe(dl, demux, first: bytes, codec: str, scale: int, preset: str,
                 yield b
             proc.wait()
             f.close()
-            if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+            # A header-only MP4 (~800 B) means no frame made it; don't cache that.
+            if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > MIN_MP4:
                 tmp.replace(cache)
             else:
                 tmp.unlink(missing_ok=True)
@@ -404,6 +428,8 @@ def _file_at(channel: int, ts: str) -> dict[str, Any] | None:
 # seconds earlier (clamped to the file start) to give the decoder a complete
 # keyframe to warm up on, then trim the pre-roll from the output.
 PAD = 3.0
+CLIP_IDLE = 4.0  # s of NVR silence that means "no more footage"
+MIN_MP4 = 4096  # bytes; below this a fragmented MP4 holds no video
 
 
 def _padded(rec: dict[str, Any], ts: str) -> tuple[str, float]:
@@ -461,8 +487,11 @@ def clip(channel: int, start: str, duration: int = 90,
         client = DVRIPClient(host=CFG.host, port=CFG.port,
                              username=CFG.username, password=CFG.password)
         client.connect()
-        dl = client.stream_recording(rec["fileName"], dl_start, end, idle_timeout=1.0)
-        demux = sofia.StreamDemux()
+        # End-of-chunk is detected from the I-frame clock (stop_at below), so the
+        # idle timeout only fires at the real end of footage. Keep it generous: a
+        # >1s hiccup on the NVR link used to end the clip after one GOP.
+        dl = client.stream_recording(rec["fileName"], dl_start, end, idle_timeout=CLIP_IDLE)
+        demux = sofia.StreamDemux(from_keyframe=True)
         first = b""
         for body in dl:                   # prime: pull until the first decodable NALs
             first = demux.feed(body)
@@ -473,6 +502,8 @@ def clip(channel: int, start: str, duration: int = 90,
         if not first:
             raise HTTPException(status_code=404, detail="no footage at that time")
         codec = sofia.detect_codec(first)
+        if demux.key_time:                # output starts at the first keyframe
+            trim = max(0.0, (datetime.strptime(start, _FMT) - demux.key_time).total_seconds())
     except HTTPException:
         if dl is not None:
             try: dl.close()
@@ -494,7 +525,8 @@ def clip(channel: int, start: str, duration: int = 90,
             _PLAYBACK_SEM.release()
         raise HTTPException(status_code=502, detail=f"playback failed: {e}")
     gen = _ffmpeg_pipe(dl, demux, first, codec, scale, preset, cache,
-                       trim=trim, client=client, sem=_PLAYBACK_SEM)
+                       trim=trim, client=client, sem=_PLAYBACK_SEM,
+                       stop_at=datetime.strptime(end, _FMT))
     return StreamingResponse(gen(), media_type="video/mp4")
 
 

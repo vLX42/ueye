@@ -9,6 +9,9 @@ quirks) rather than trusting the per-frame length.
 """
 from __future__ import annotations
 
+import struct
+from datetime import datetime
+
 VIDEO_HEADER = {0xFC: 16, 0xFD: 8}          # I-frame, P-frame
 SKIP = {0xFA, 0xFB, 0xFE, 0xF9, 0xF8, 0xF0}  # audio / other
 _MARKERS = set(VIDEO_HEADER) | SKIP
@@ -38,10 +41,16 @@ class StreamDemux:
     """Incremental version of to_annexb for a live download. Feed it sofia-framed
     bytes as they arrive; it returns the Annex-B for every frame whose end is now
     known (i.e. up to the last complete marker), and keeps the trailing partial
-    frame buffered until the next marker arrives. flush() emits the final frame."""
+    frame buffered until the next marker arrives. flush() emits the final frame.
 
-    def __init__(self) -> None:
+    With from_keyframe, frames before the first I-frame are dropped: a ByName
+    sub-range starts mid-GOP, and those orphan P-frames only decode to errors (and
+    Debian's ffmpeg 7 still emits them as smeared frames)."""
+
+    def __init__(self, from_keyframe: bool = False) -> None:
         self.buf = bytearray()
+        self.synced = not from_keyframe
+        self.key_time: datetime | None = None  # wall clock of the first I-frame
 
     def _emit(self, final: bool) -> bytes:
         buf = self.buf
@@ -64,7 +73,10 @@ class StreamDemux:
             o = marks[k]
             nxt = marks[k + 1] if k + 1 < len(marks) else n
             hl = VIDEO_HEADER.get(buf[o + 3])
-            if hl is not None:
+            if buf[o + 3] == 0xFC and self.key_time is None:
+                self.synced = True
+                self.key_time = iframe_time(buf[o:o + 16])
+            if hl is not None and self.synced:
                 out += buf[o + hl:nxt]
         self.buf = bytearray() if final else bytearray(buf[marks[-1]:])
         return bytes(out)
@@ -75,6 +87,28 @@ class StreamDemux:
 
     def flush(self) -> bytes:
         return self._emit(final=True)
+
+
+def iframe_time(hdr: bytes) -> datetime | None:
+    """Wall-clock time packed into a sofia I-frame header (bytes 8-11, LE):
+    year-2000:6 | month:4 | day:5 | hour:5 | minute:6 | second:6. One-second
+    resolution; verified against the NVR's OSD clock."""
+    if len(hdr) < 12:
+        return None
+    v = struct.unpack_from("<I", hdr, 8)[0]
+    try:
+        return datetime((v >> 26) + 2000, (v >> 22) & 15, (v >> 17) & 31,
+                        (v >> 12) & 31, (v >> 6) & 63, v & 63)
+    except ValueError:
+        return None
+
+
+def last_iframe_time(data: bytes) -> datetime | None:
+    """Time of the last I-frame header fully inside data, or None."""
+    i = data.rfind(b"\x00\x00\x01\xfc")
+    while i >= 0 and i + 12 > len(data):
+        i = data.rfind(b"\x00\x00\x01\xfc", 0, i)
+    return iframe_time(data[i:i + 16]) if i >= 0 else None
 
 
 def detect_codec(annexb: bytes) -> str:

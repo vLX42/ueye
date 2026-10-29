@@ -71,6 +71,19 @@ class DVRIPError(RuntimeError):
     pass
 
 
+def _is_status(body: bytes) -> bool:
+    """True for a JSON status reply on the media msgid. Media chunks are arbitrary
+    slices of the byte stream, so ~1 in 256 starts with b"{" by chance; checking
+    the first byte alone dropped those and corrupted the clip until the next GOP."""
+    if body[:1] != b"{":
+        return False
+    try:
+        json.loads(body.rstrip(b"\x00"))
+        return True
+    except ValueError:
+        return False
+
+
 @dataclass
 class DVRIPClient:
     host: str
@@ -293,7 +306,7 @@ class DVRIPClient:
                     head = self._recv_exact(HEADER_LEN)
                     mid, length = struct.unpack_from("<HI", head, 14)
                     body = self._recv_exact(length) if length else b""
-                    if mid == 1426 and body[:1] != b"{":
+                    if mid == 1426 and not _is_status(body):
                         buf += body
                     if max_bytes and len(buf) >= max_bytes:
                         break
@@ -339,7 +352,7 @@ class DVRIPClient:
                     head = self._recv_exact(HEADER_LEN)
                     mid, length = struct.unpack_from("<HI", head, 14)
                     body = self._recv_exact(length) if length else b""
-                    if mid == 1426 and body[:1] != b"{":
+                    if mid == 1426 and not _is_status(body):
                         yield body
             except (OSError, DVRIPError):
                 pass  # idle timeout = end of stream
