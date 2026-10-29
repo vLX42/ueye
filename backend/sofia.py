@@ -45,11 +45,19 @@ class StreamDemux:
 
     With from_keyframe, frames before the first I-frame are dropped: a ByName
     sub-range starts mid-GOP, and those orphan P-frames only decode to errors (and
-    Debian's ffmpeg 7 still emits them as smeared frames)."""
+    Debian's ffmpeg 7 still emits them as smeared frames).
 
-    def __init__(self, from_keyframe: bool = False) -> None:
+    start_at/stop_at (with from_keyframe) cut on keyframe boundaries by the I-frame
+    clock: output runs from the first I-frame stamped >= start_at up to, not
+    including, the first one stamped >= stop_at. Consecutive chunks cut this way
+    tile exactly, which is what a no-transcode (stream copy) clip needs."""
+
+    def __init__(self, from_keyframe: bool = False, start_at: datetime | None = None,
+                 stop_at: datetime | None = None) -> None:
         self.buf = bytearray()
         self.synced = not from_keyframe
+        self.done = False
+        self.start_at, self.stop_at = start_at, stop_at
         self.key_time: datetime | None = None  # wall clock of the first I-frame
 
     def _emit(self, final: bool) -> bytes:
@@ -73,10 +81,14 @@ class StreamDemux:
             o = marks[k]
             nxt = marks[k + 1] if k + 1 < len(marks) else n
             hl = VIDEO_HEADER.get(buf[o + 3])
-            if buf[o + 3] == 0xFC and self.key_time is None:
-                self.synced = True
-                self.key_time = iframe_time(buf[o:o + 16])
-            if hl is not None and self.synced:
+            if buf[o + 3] == 0xFC:
+                t = iframe_time(buf[o:o + 16])
+                if not self.synced and (self.start_at is None or (t and t >= self.start_at)):
+                    self.synced = True
+                    self.key_time = t
+                elif self.synced and self.stop_at and t and t >= self.stop_at:
+                    self.done = True
+            if hl is not None and self.synced and not self.done:
                 out += buf[o + hl:nxt]
         self.buf = bytearray() if final else bytearray(buf[marks[-1]:])
         return bytes(out)

@@ -720,13 +720,25 @@ const secOfDay = ts => { const t = (ts || '').slice(11, 19).split(':').map(Numbe
 const fmtClock = s => { s = Math.max(0, Math.round(s)); return `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s % 3600 / 60))}:${pad(s % 60)}`; };
 const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
 
+const CAN_HEVC = (() => {
+  try { return !!document.createElement('video').canPlayType('video/mp4; codecs="hvc1.1.6.L153.B0"'); }
+  catch { return false; }
+})();
 const REC = {
   date: null, loaded: false,
   seg: {},                 // channel -> [{beginSec,endSec,...}]
   events: [],              // motion/alarm segments, time-sorted
   filter: new Set(['continuous', 'motion', 'alarm', 'manual']),
   zoom: 1, fitWidth: 900,
-  quality: (() => { try { return localStorage.getItem('rec-quality') || 'sd'; } catch { return 'sd'; } })(),
+  // 'orig' = the camera's own 4K HEVC, no server transcode (the NAS CPU can't
+  // transcode 4K HEVC in real time). Default wherever the browser can play HEVC.
+  quality: (() => {
+    const def = CAN_HEVC ? 'orig' : 'sd';
+    try {
+      const q = localStorage.getItem('rec-quality2') || def;
+      return q === 'orig' && !CAN_HEVC ? 'sd' : q;
+    } catch { return def; }
+  })(),
   play: { ch: null, chunkStart: 0, prefetched: null },
 };
 
@@ -742,9 +754,15 @@ async function loadDay(date) {
   try {
     const r = await api(`/recordings?channel=all&date=${date}&event=all`);
     REC.seg = {}; REC.events = [];
-    const files = (r.days[0] && r.days[0].files) || [];
+    // The NVR also lists a file that started the evening before and runs past
+    // midnight, grouped under ITS day, which can come first in `days`. Take
+    // every file that overlaps `date` and clamp it to the day.
+    const files = r.days.flatMap(d => d.files || [])
+      .filter(f => f.begin.slice(0, 10) <= date && f.end > date + ' 00:00:00');
     for (const f of files) {
-      const s = { ...f, beginSec: secOfDay(f.begin), endSec: Math.max(secOfDay(f.begin) + 1, secOfDay(f.end) || DAY) };
+      const b = f.begin.slice(0, 10) < date ? 0 : secOfDay(f.begin);
+      const e = f.end.slice(0, 10) > date ? DAY : (secOfDay(f.end) || DAY);
+      const s = { ...f, beginSec: b, endSec: Math.max(b + 1, e) };
       (REC.seg[f.channel] = REC.seg[f.channel] || []).push(s);
       if (f.type === 'motion' || f.type === 'alarm') REC.events.push(s);
     }
@@ -911,8 +929,11 @@ function bindPlayer() {
     const cur = REC.play.chunkStart + v.currentTime;
     positionPlayhead(cur);
     $('#pb-time').textContent = `${chName(REC.play.ch)} · ${fmtClock(cur)}`;
-    if (v.duration && (v.duration - v.currentTime) < PREFETCH) {
-      const next = REC.play.chunkStart + v.duration;
+    // Chunks tile as [start, start+CHUNK) on the server. Don't derive the next
+    // one from v.duration: a streamed chunk's duration grows as it downloads, so
+    // that fired a fresh prefetch (= NVR pull) for a new start every second.
+    if (v.currentTime && (CHUNK - v.currentTime) < PREFETCH) {
+      const next = REC.play.chunkStart + CHUNK;
       if (REC.play.prefetched !== next && hasFootage(REC.play.ch, next)) {
         REC.play.prefetched = next;
         // Drain the body: the server only finalises its on-disk clip cache once the
@@ -926,7 +947,7 @@ function bindPlayer() {
   };
   v.onended = () => {
     const played = v.duration || 0;
-    const next = REC.play.chunkStart + played;
+    const next = REC.play.chunkStart + CHUNK;
     // Stop at the live edge / a gap instead of rapidly re-requesting: if this
     // chunk was tiny (ran out of footage) or the next moment has no recording,
     // halt rather than loop.
@@ -947,18 +968,18 @@ function bindPlayer() {
   $('#pb-nextev').onclick = () => jumpEvent(1);
   const setQuality = qv => {
     REC.quality = qv;
-    try { localStorage.setItem('rec-quality', qv); } catch {}
-    $('#pb-hd').classList.toggle('on', qv === 'hd');
-    $('#pb-sd').classList.toggle('on', qv === 'sd');
+    try { localStorage.setItem('rec-quality2', qv); } catch {}
+    for (const q of ['sd', 'hd', 'orig']) $('#pb-' + q).classList.toggle('on', qv === q);
     if (REC.play.ch != null) {   // reload current moment at the new quality
       const at = REC.play.chunkStart + v.currentTime;
       seekTo(REC.play.ch, at);
     }
   };
-  $('#pb-hd').classList.toggle('on', REC.quality === 'hd');
-  $('#pb-sd').classList.toggle('on', REC.quality === 'sd');
-  $('#pb-hd').onclick = () => setQuality('hd');
-  $('#pb-sd').onclick = () => setQuality('sd');
+  $('#pb-orig').hidden = !CAN_HEVC;
+  for (const q of ['sd', 'hd', 'orig']) {
+    $('#pb-' + q).classList.toggle('on', REC.quality === q);
+    $('#pb-' + q).onclick = () => setQuality(q);
+  }
   $('#pb-full').onclick = () => { const b = $('.rec-video-box'); (b.requestFullscreen || b.webkitRequestFullscreen).call(b); };
   $('#pb-close').onclick = () => {
     v.pause(); v.removeAttribute('src'); v.load();

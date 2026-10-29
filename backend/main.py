@@ -146,7 +146,8 @@ def _ffmpeg_stream(es: bytes, codec: str, scale: int, preset: str, cache: Path, 
 
 
 def _ffmpeg_pipe(dl, demux, first: bytes, codec: str, scale: int, preset: str,
-                 cache: Path, trim: float, client, sem, stop_at: datetime | None = None):
+                 cache: Path, trim: float, client, sem, stop_at: datetime | None = None,
+                 copy: bool = False, length: float = 0.0):
     """Transcode a LIVE download to fragmented MP4. `first` is the already-demuxed
     opening NALs (used to pick the input format); the rest is demuxed from `dl` as
     it streams in and fed to ffmpeg, so output starts without waiting for the whole
@@ -154,13 +155,23 @@ def _ffmpeg_pipe(dl, demux, first: bytes, codec: str, scale: int, preset: str,
     stream ends or the client disconnects. With stop_at, the download ends at the
     first I-frame stamped at/after it instead of waiting for the idle timeout."""
     in_fmt = "hevc" if codec == "hevc" else "h264"
-    ss = ["-ss", f"{trim:.3f}"] if trim > 0 else []
-    vf = ["-vf", f"scale='min({scale},iw)':-2"] if scale else []
-    args = ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", in_fmt, "-i", "pipe:0",
-            *ss, *vf, "-c:v", "libx264", "-preset", preset, "-tune", "zerolatency",
-            "-pix_fmt", "yuv420p", "-g", "30", "-avoid_negative_ts", "make_zero",
-            "-movflags", "frag_keyframe+empty_moov+faststart+default_base_moof",
-            "-an", "-f", "mp4", "pipe:1"]
+    mov = ["-movflags", "frag_keyframe+empty_moov+faststart+default_base_moof",
+           "-an", "-f", "mp4", "pipe:1"]
+    if copy:
+        # Original stream, no decode: ~0.2s CPU per chunk vs 20-40s to transcode
+        # 4K HEVC on the NAS (2012 Xeon, no HEVC hw decode). Frame rate comes
+        # from the stream's VUI; the demux already cut on keyframes.
+        tag = ["-tag:v", "hvc1"] if codec == "hevc" else []
+        args = ["ffmpeg", "-nostdin", "-loglevel", "error", "-fflags", "+genpts",
+                "-f", in_fmt, "-i", "pipe:0", "-c:v", "copy", *tag, *mov]
+    else:
+        ss = ["-ss", f"{trim:.3f}"] if trim > 0 else []
+        tt = ["-t", f"{length:.3f}"] if length > 0 else []
+        vf = ["-vf", f"scale='min({scale},iw)':-2"] if scale else []
+        args = ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", in_fmt, "-i", "pipe:0",
+                *ss, *tt, *vf, "-c:v", "libx264", "-preset", preset, "-tune", "zerolatency",
+                "-pix_fmt", "yuv420p", "-g", "30", "-avoid_negative_ts", "make_zero",
+                *mov]
     proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL)
     # The NVR stops sending if we fall behind, and the idle timeout then reads
@@ -204,19 +215,20 @@ def _ffmpeg_pipe(dl, demux, first: bytes, codec: str, scale: int, preset: str,
             try: proc.stdin.close()
             except Exception: pass
 
-    threading.Thread(target=pull, daemon=True).start()
-    threading.Thread(target=feed, daemon=True).start()
     tmp = cache.with_suffix(".part")
+    out: queue.Queue = queue.Queue()
 
-    def gen():
+    # ffmpeg's output is owned by a thread, not by the response generator:
+    # Starlette never closes a sync generator when the client disconnects, so
+    # cleanup in its `finally` never ran and every aborted clip (seek, reload,
+    # prefetch) leaked a _PLAYBACK_SEM slot. Two leaks and playback hung until a
+    # restart. Now the chunk always finishes into the cache and frees its slot.
+    def drain():
         f = open(tmp, "wb")
         try:
-            while True:
-                b = proc.stdout.read(65536)
-                if not b:
-                    break
+            while (b := proc.stdout.read(65536)):
                 f.write(b)
-                yield b
+                out.put(b)
             proc.wait()
             f.close()
             # A header-only MP4 (~800 B) means no frame made it; don't cache that.
@@ -224,12 +236,23 @@ def _ffmpeg_pipe(dl, demux, first: bytes, codec: str, scale: int, preset: str,
                 tmp.replace(cache)
             else:
                 tmp.unlink(missing_ok=True)
+        except Exception:
+            tmp.unlink(missing_ok=True)
         finally:
             if not f.closed:
                 f.close()
             if proc.poll() is None:
                 proc.kill()
+            out.put(None)
             sem.release()
+
+    threading.Thread(target=pull, daemon=True).start()
+    threading.Thread(target=feed, daemon=True).start()
+    threading.Thread(target=drain, daemon=True).start()
+
+    def gen():
+        while (b := out.get()) is not None:
+            yield b
     return gen
 
 
@@ -428,6 +451,7 @@ def _file_at(channel: int, ts: str) -> dict[str, Any] | None:
 # seconds earlier (clamped to the file start) to give the decoder a complete
 # keyframe to warm up on, then trim the pre-roll from the output.
 PAD = 3.0
+THUMB_WINDOW = 6   # s searched for a keyframe (GOP is ~2s)
 CLIP_IDLE = 4.0  # s of NVR silence that means "no more footage"
 MIN_MP4 = 4096  # bytes; below this a fragmented MP4 holds no video
 
@@ -447,6 +471,9 @@ def _padded(rec: dict[str, Any], ts: str) -> tuple[str, float]:
 QUALITY = {
     "sd": {"scale": 640, "preset": "ultrafast"},
     "hd": {"scale": 1280, "preset": "veryfast"},
+    # Original 4K stream, no transcode. For browsers that play HEVC (Chrome on
+    # macOS, Safari); the frontend only offers it when canPlayType says so.
+    "orig": {"scale": 0, "preset": "", "copy": True},
 }
 
 
@@ -462,7 +489,7 @@ def clip(channel: int, start: str, duration: int = 90,
     start = _norm_time(start)
     duration = max(1, min(int(duration), CLIP_MAX_DURATION))
     qp = QUALITY.get(q, QUALITY["hd"])
-    scale, preset = qp["scale"], qp["preset"]
+    scale, preset, copy = qp["scale"], qp["preset"], qp.get("copy", False)
     end = (datetime.strptime(start, _FMT) + timedelta(seconds=duration)).strftime(_FMT)
     cache = _cache_path("clip", f"{channel}|{start}|{duration}|{transcode}|{q}", "mp4")
     if cache.exists() and cache.stat().st_size > 0:
@@ -490,8 +517,17 @@ def clip(channel: int, start: str, duration: int = 90,
         # End-of-chunk is detected from the I-frame clock (stop_at below), so the
         # idle timeout only fires at the real end of footage. Keep it generous: a
         # >1s hiccup on the NVR link used to end the clip after one GOP.
-        dl = client.stream_recording(rec["fileName"], dl_start, end, idle_timeout=CLIP_IDLE)
-        demux = sofia.StreamDemux(from_keyframe=True)
+        # The NVR stops at EndTime itself, so ask a GOP past the end: the keyframe
+        # that closes this chunk then arrives and stop_at ends the pull right
+        # there instead of after CLIP_IDLE of silence.
+        nvr_end = min((datetime.strptime(end, _FMT) + timedelta(seconds=PAD)).strftime(_FMT), rec["end"])
+        dl = client.stream_recording(rec["fileName"], dl_start, nvr_end, idle_timeout=CLIP_IDLE)
+        if copy:   # no trim possible without decoding: cut on keyframes instead
+            demux = sofia.StreamDemux(from_keyframe=True,
+                                      start_at=datetime.strptime(start, _FMT),
+                                      stop_at=datetime.strptime(end, _FMT))
+        else:
+            demux = sofia.StreamDemux(from_keyframe=True)
         first = b""
         for body in dl:                   # prime: pull until the first decodable NALs
             first = demux.feed(body)
@@ -502,7 +538,9 @@ def clip(channel: int, start: str, duration: int = 90,
         if not first:
             raise HTTPException(status_code=404, detail="no footage at that time")
         codec = sofia.detect_codec(first)
-        if demux.key_time:                # output starts at the first keyframe
+        if copy:
+            trim = 0.0
+        elif demux.key_time:              # output starts at the first keyframe
             trim = max(0.0, (datetime.strptime(start, _FMT) - demux.key_time).total_seconds())
     except HTTPException:
         if dl is not None:
@@ -526,7 +564,8 @@ def clip(channel: int, start: str, duration: int = 90,
         raise HTTPException(status_code=502, detail=f"playback failed: {e}")
     gen = _ffmpeg_pipe(dl, demux, first, codec, scale, preset, cache,
                        trim=trim, client=client, sem=_PLAYBACK_SEM,
-                       stop_at=datetime.strptime(end, _FMT))
+                       stop_at=datetime.strptime(end, _FMT), copy=copy,
+                       length=(datetime.strptime(end, _FMT) - datetime.strptime(start, _FMT)).total_seconds())
     return StreamingResponse(gen(), media_type="video/mp4")
 
 
@@ -534,8 +573,11 @@ def clip(channel: int, start: str, duration: int = 90,
 def thumb(channel: int, time: str, scale: int = 320) -> Response:
     """A single JPEG frame grabbed at `time` (for timeline hover + event cards).
 
-    Pulls a ~2s ByTime window and extracts the first decodable frame. Cached hard;
-    thumbnails for a day are stable so this is a one-time cost per moment.
+    Takes the first COMPLETE keyframe at/after `time`: the download stops as soon
+    as that I-frame is fully in, and only that one frame is decoded. Cheap on the
+    NAS CPU (no 4K HEVC GOP to chew through) and never half-drawn: the old padded
+    window decoded whatever arrived, so a cut download gave a magenta/smeared
+    frame. Cached hard; thumbnails for a day are stable.
     """
     time = _norm_time(time)
     cache = _cache_path("thumb", f"{channel}|{time}|{scale}", "jpg")
@@ -544,25 +586,31 @@ def thumb(channel: int, time: str, scale: int = 320) -> Response:
     rec = _file_at(channel, time)
     if not rec:
         raise HTTPException(status_code=404, detail="no footage at that time")
-    dl_start, trim = _padded(rec, time)
-    end = min((datetime.strptime(time, _FMT) + timedelta(seconds=2)).strftime(_FMT), rec["end"])
+    end = min((datetime.strptime(time, _FMT) + timedelta(seconds=THUMB_WINDOW)).strftime(_FMT), rec["end"])
     with _PLAYBACK_SEM:
         if cache.exists() and cache.stat().st_size > 0:
             return FileResponse(cache, media_type="image/jpeg")
         try:
             with nvr() as c:
-                raw = c.download_recording(rec["fileName"], dl_start, end, expected_bytes=None, idle_timeout=1.2)
-            es = sofia.to_annexb(raw) if raw else b""
+                demux = sofia.StreamDemux(from_keyframe=True)
+                es = b""
+                dl = c.stream_recording(rec["fileName"], time, end, idle_timeout=CLIP_IDLE)
+                try:
+                    for body in dl:
+                        # feed() only returns frames whose end has been seen, so the
+                        # first non-empty output holds a complete I-frame.
+                        es = demux.feed(body)
+                        if es:
+                            break
+                    else:
+                        es = demux.flush()
+                finally:
+                    dl.close()
             if not es:
                 raise HTTPException(status_code=404, detail="no frame at that time")
-            codec = sofia.detect_codec(es)
-            in_fmt = "hevc" if codec == "hevc" else "h264"
-            # Pad earlier + output -ss trim so the decoder warms up on a complete
-            # keyframe and we emit a clean frame at the requested moment (a raw
-            # sub-range boundary otherwise yields a smeared/partial first keyframe).
-            ss = ["-ss", f"{trim:.3f}"] if trim > 0 else []
-            args = ["ffmpeg", "-nostdin", "-loglevel", "error",
-                    "-f", in_fmt, "-i", "pipe:0", *ss, "-frames:v", "1",
+            in_fmt = "hevc" if sofia.detect_codec(es) == "hevc" else "h264"
+            args = ["ffmpeg", "-nostdin", "-loglevel", "error", "-skip_frame", "nokey",
+                    "-f", in_fmt, "-i", "pipe:0", "-frames:v", "1",
                     "-vf", f"scale='min({scale},iw)':-2", "-q:v", "4",
                     "-f", "image2", "pipe:1"]
             proc = subprocess.run(args, input=es, capture_output=True)

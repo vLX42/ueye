@@ -73,3 +73,26 @@ def test_last_iframe_time_ignores_truncated_header():
     blob = _iframe(v, b"xx") + b"\x00\x00\x01\xfc\x53\x0a"   # 2nd header cut off
     assert sofia.last_iframe_time(blob) == datetime(2026, 10, 29, 9, 30, 2)
     assert sofia.last_iframe_time(b"\x00\x00\x01\xfd") is None
+
+
+def _stamp(sec: int) -> int:
+    # 2026-10-29 09:30:<sec> in the sofia I-frame clock layout
+    return (26 << 26) | (10 << 22) | (29 << 17) | (9 << 12) | (30 << 6) | sec
+
+
+def test_demux_keyframe_cuts_tile_consecutive_chunks():
+    import sofia
+    from datetime import datetime
+    at = lambda s: datetime(2026, 10, 29, 9, 30, s)
+    p = lambda n: b"\x00\x00\x01\xfd" + b"\x00" * 4 + b"\x00\x00\x00\x01\x02\x01P" + bytes([n])
+    gop = lambda s: _iframe(_stamp(s), b"\x00\x00\x00\x01\x26\x01I" + bytes([s])) + p(s) + p(s)
+    stream = p(99) + b"".join(gop(s) for s in (0, 2, 4, 6, 8))
+
+    def cut(a, b):
+        d = sofia.StreamDemux(from_keyframe=True, start_at=at(a), stop_at=at(b))
+        return d.feed(stream) + d.flush()
+
+    whole, first, second = cut(1, 7), cut(1, 4), cut(4, 7)
+    assert first + second == whole                 # no gap, no overlap
+    assert whole.startswith(b"\x00\x00\x00\x01\x26\x01I\x02")   # first I-frame >= :01
+    assert b"I\x06" in whole and b"I\x08" not in whole   # cut before the :08 I-frame

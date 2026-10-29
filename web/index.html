@@ -10,7 +10,7 @@
        works fully offline. Loaded before style.css so the hand-written component
        styles win on any conflict. -->
   <link rel="stylesheet" href="tailwind.css?v=19" />
-  <link rel="stylesheet" href="style.css?v=19" />
+  <link rel="stylesheet" href="style.css?v=21" />
   <!-- go2rtc web component: <video-stream> handles MSE/WebRTC fallback -->
   <script type="module" src="/go2rtc/video-stream.js"></script>
 </head>
@@ -61,8 +61,8 @@
           <span class="pb-spacer"></span>
           <button id="pb-prevev" class="pb-btn" title="Previous event">◀ event</button>
           <button id="pb-nextev" class="pb-btn" title="Next event">event ▶</button>
-          <span class="pb-qual" title="Playback quality (SD is lighter — good for remote viewing)">
-            <button id="pb-sd" class="pb-q on">SD</button><button id="pb-hd" class="pb-q">HD</button>
+          <span class="pb-qual" title="Playback quality. 4K is the original stream and the fastest to start; SD/HD are transcoded on the server (lighter for remote viewing)">
+            <button id="pb-sd" class="pb-q on">SD</button><button id="pb-hd" class="pb-q">HD</button><button id="pb-orig" class="pb-q" hidden>4K</button>
           </span>
           <label class="pb-speed">Speed
             <select id="pb-rate">
@@ -119,6 +119,6 @@
     </section>
   </main>
 
-  <script src="app.js?v=19"></script>
+  <script src="app.js?v=21"></script>
 </body>
 </html>
