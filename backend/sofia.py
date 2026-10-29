@@ -17,16 +17,25 @@ SKIP = {0xFA, 0xFB, 0xFE, 0xF9, 0xF8, 0xF0}  # audio / other
 _MARKERS = set(VIDEO_HEADER) | SKIP
 
 
+def _marks(buf) -> list[int]:
+    """Offsets of every sofia frame marker. bytes.find runs in C; a per-byte
+    Python loop here took ~3s per 20s of 4K on a fast Mac and several times
+    that on the NAS, which made it the playback bottleneck."""
+    out: list[int] = []
+    n = len(buf)
+    i = buf.find(b"\x00\x00\x01")
+    while 0 <= i and i + 4 <= n:
+        if buf[i + 3] in _MARKERS:
+            out.append(i)
+            i = buf.find(b"\x00\x00\x01", i + 4)
+        else:
+            i = buf.find(b"\x00\x00\x01", i + 1)
+    return out
+
+
 def to_annexb(raw: bytes) -> bytes:
     n = len(raw)
-    marks: list[int] = []
-    i = 0
-    while i + 4 <= n:
-        if raw[i:i + 3] == b"\x00\x00\x01" and raw[i + 3] in _MARKERS:
-            marks.append(i)
-            i += 4
-        else:
-            i += 1
+    marks = _marks(raw)
     marks.append(n)
     out = bytearray()
     for k in range(len(marks) - 1):
@@ -63,14 +72,7 @@ class StreamDemux:
     def _emit(self, final: bool) -> bytes:
         buf = self.buf
         n = len(buf)
-        marks: list[int] = []
-        i = 0
-        while i + 4 <= n:
-            if buf[i:i + 3] == b"\x00\x00\x01" and buf[i + 3] in _MARKERS:
-                marks.append(i)
-                i += 4
-            else:
-                i += 1
+        marks = _marks(buf)
         if not marks:
             return b""
         # Without `final`, the last marker's frame isn't complete yet (its payload
