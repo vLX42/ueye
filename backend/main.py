@@ -43,7 +43,10 @@ try:
     import cv2  # noqa: E402
     import faces as faceslib  # noqa: E402
     import faceindex  # noqa: E402
+    import persons  # noqa: E402
+    import visitorindex  # noqa: E402
     faceindex.init_db()
+    visitorindex.init_db()
     FACES_OK = True
 except Exception as _face_err:  # pragma: no cover
     FACES_OK = False
@@ -1059,22 +1062,49 @@ THUMB_KEEP_DAYS = 45      # fallback only; normally thumbs follow the NVR's olde
 CLIP_KEEP_S = 86400       # cached playback chunks (in /tmp) are cheap to remake
 
 
-def _warm_pass(days: list[str], failed: set) -> int:
-    made = 0
+BACKFILL_DAYS = 7         # thumbnails + visitor/face scan cover the last week
+PASS_BUDGET = 240         # s of backlog work per pass, so new alerts never wait long
+
+
+def _day_events(day: str) -> list[dict]:
+    out = []
+    for ch in CFG.channels:
+        out += [r for r in _files_for(ch.id, day)
+                if r.get("type") in ("motion", "alarm") and r["begin"][:10] == day]
+    return sorted(out, key=lambda r: r["begin"], reverse=True)   # newest first
+
+
+def _warm_pass(days: list[str], failed: set, deadline: float) -> tuple[int, int, bool]:
+    """Thumbnails, then visitor/face scan, day by day (newest first). Stops at
+    `deadline`; returns (thumbs made, events scanned, backlog left)."""
+    made = scanned = 0
     for day in days:
-        for ch in CFG.channels:
-            for r in _files_for(ch.id, day):
-                if r.get("type") not in ("motion", "alarm") or r["begin"][:10] != day:
-                    continue
-                key = (ch.id, r["begin"])
-                if key in failed or _cache_path("thumb", f"{ch.id}|{r['begin']}|320", "jpg").exists():
-                    continue
-                try:
-                    _make_thumb(ch.id, r["begin"])
-                    made += 1
-                except Exception:
-                    failed.add(key)       # no frame there: don't retry every pass
-    return made
+        evs = _day_events(day)
+        for r in evs:
+            key = (r["channel"], r["begin"])
+            if key in failed or _cache_path("thumb", f"{r['channel']}|{r['begin']}|320", "jpg").exists():
+                continue
+            if time.time() > deadline:
+                return made, scanned, True
+            try:
+                _make_thumb(r["channel"], r["begin"])
+                made += 1
+            except Exception:
+                failed.add(key)       # no frame there: don't retry every pass
+        if not FACES_OK or _index_job["running"]:
+            continue                  # a manual scan is running: let it work
+        for r in evs:
+            if visitorindex.event_done(r["channel"], r["begin"]) and faceindex.event_done(r["channel"], r["begin"]):
+                continue
+            if time.time() > deadline:
+                return made, scanned, True
+            try:
+                _scan_event(r["channel"], r["begin"], r.get("duration_s", 10))
+                scanned += 1
+            except Exception as e:
+                print(f"[scan] {r['channel']} {r['begin']}: {e}", flush=True)
+                visitorindex.record(r["channel"], r["begin"], 0)   # don't loop on it
+    return made, scanned, False
 
 
 def _oldest_footage_day() -> str:
@@ -1096,6 +1126,8 @@ def _prune_caches() -> None:
         day = f.name.split("_")[1]
         if not (len(day) == 8 and day.isdigit()) or day < keep_from:
             f.unlink(missing_ok=True)     # also drops old-style names without a day
+    if FACES_OK:
+        visitorindex.prune(f"{keep_from[:4]}-{keep_from[4:6]}-{keep_from[6:]}")
     for f in CACHE_DIR.glob("clip_*"):
         if now - f.stat().st_mtime > CLIP_KEEP_S:
             f.unlink(missing_ok=True)
@@ -1104,21 +1136,21 @@ def _prune_caches() -> None:
 def _warm_loop() -> None:
     time.sleep(30)                         # let startup + first page loads go first
     failed: set = set()
-    first = True
     while True:
+        backlog = False
         try:
             now = datetime.now()
-            days = [now.strftime("%Y-%m-%d")]
-            if first or now.hour == 0:     # yesterday too: on start and just after midnight
-                days.append((now - timedelta(days=1)).strftime("%Y-%m-%d"))
-            made = _warm_pass(days, failed)
-            if made:
-                print(f"[thumbs] made {made} event thumbnails", flush=True)
+            days = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(BACKFILL_DAYS)]
+            made, scanned, backlog = _warm_pass(days, failed, time.time() + PASS_BUDGET)
+            if made or scanned:
+                print(f"[thumbs] made {made} thumbnails, scanned {scanned} events"
+                      f"{' (more to do)' if backlog else ''}", flush=True)
+            if scanned and FACES_OK:
+                faceindex.auto_merge()
             _prune_caches()
-            first = False
         except Exception as e:
             print(f"[thumbs] warm pass failed: {e}", flush=True)
-        time.sleep(WARM_EVERY)
+        time.sleep(15 if backlog else WARM_EVERY)
 
 
 threading.Thread(target=_warm_loop, daemon=True, name="thumb-warmer").start()
@@ -1173,6 +1205,82 @@ def _frames_bgr(channel: int, ts: str, secs: int = 15, cap: int = 12) -> list:
     return frames
 
 
+_scan_lock = threading.Lock()   # one event scan at a time (manual job vs background)
+SCAN_PERSON_FRAMES = 5          # person detection on at most this many frames per event
+
+
+def _scan_event(ch: int, ts: str, duration_s: int = 10) -> int:
+    """Visitors + faces for one motion/alarm event, from ONE NVR pull.
+
+    Person detection (whole body, so caps/backs/parcels count) on a few spread
+    keyframes keeps the best shot for the Visitors view. Face detection then only
+    runs on frames that had a person, which skips cars, cats, rain and shadows.
+    Returns the number of faces stored. Idempotent per (channel, ts).
+    """
+    with _scan_lock:
+        need_v = not visitorindex.event_done(ch, ts)
+        need_f = not faceindex.event_done(ch, ts)
+        if not (need_v or need_f):
+            return 0
+        secs = min(max(int(duration_s), 6), 20)
+        try:
+            frames = _frames_bgr(ch, ts, secs=secs)
+        except Exception:
+            frames = []
+        if not frames:
+            if need_v:
+                visitorindex.record(ch, ts, 0)
+            if need_f:
+                faceindex.mark_event(ch, ts)
+            return 0
+        step = max(1, len(frames) // SCAN_PERSON_FRAMES)
+        picks = frames[::step][:SCAN_PERSON_FRAMES]
+        best, most, person_frames = None, 0, []
+        for img in picks:
+            dets = persons.detect(img)
+            if dets:
+                person_frames.append(img)
+                most = max(most, len(dets))
+                top = max(dets, key=lambda d: d["score"])
+                if best is None or top["score"] > best[0]:
+                    best = (top["score"], img, top["bbox"])
+        if need_v:
+            crop = None
+            if best:
+                _, img, (x1, y1, x2, y2) = best
+                h, w = img.shape[:2]
+                mx, my = int((x2 - x1) * 0.35), int((y2 - y1) * 0.15)   # a bit of context
+                c = img[max(0, y1 - my):min(h, y2 + my), max(0, x1 - mx):min(w, x2 + mx)]
+                if c.shape[0] > 480:
+                    c = cv2.resize(c, (int(c.shape[1] * 480 / c.shape[0]), 480))
+                ok, buf = cv2.imencode(".jpg", c, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                crop = buf.tobytes() if ok else None
+            visitorindex.record(ch, ts, most, best[0] if best else 0.0, crop)
+        found = 0
+        if need_f:
+            kept: list = []   # embeddings already stored this event
+            for img in person_frames or []:
+                h, w = img.shape[:2]
+                for f in faceslib.detect(img, min_score=0.80):
+                    x1, y1, x2, y2 = f["bbox"]
+                    x1, y1 = max(0, x1), max(0, y1)
+                    x2, y2 = min(w, x2), min(h, y2)
+                    if x2 - x1 < 32 or y2 - y1 < 32:   # drop tiny/low-quality faces
+                        continue
+                    emb = f["embedding"]
+                    # within-event dedup: same person in the next frame
+                    if any(float(np.dot(emb, k)) > 0.5 for k in kept):
+                        continue
+                    ok, buf = cv2.imencode(".jpg", img[y1:y2, x1:x2], [cv2.IMWRITE_JPEG_QUALITY, 88])
+                    if not ok:
+                        continue
+                    faceindex.add_face(ch, ts, emb, buf.tobytes(), f["score"])
+                    kept.append(emb)
+                    found += 1
+            faceindex.mark_event(ch, ts)
+        return found
+
+
 _index_job = {"running": False, "done": 0, "total": 0, "faces": 0, "label": "", "error": ""}
 _index_lock = threading.Lock()
 
@@ -1180,47 +1288,28 @@ _index_lock = threading.Lock()
 def _run_index(dates: list[str]) -> None:
     try:
         faceslib.warm()  # load models up front; surfaces download errors
+        persons.warm()
         events: list[dict] = []
         for d in dates:
-            r = recordings(channel="all", date=d, event="motion")
-            for day in r["days"]:
-                events.extend(day["files"])
+            for ev_type in ("motion", "alarm"):
+                r = recordings(channel="all", date=d, event=ev_type)
+                for day in r["days"]:
+                    events.extend(f for f in day["files"] if f["begin"][:10] == d)
         with _index_lock:
             _index_job.update(total=len(events), done=0, faces=0, error="")
         for ev in events:
             ch, ts = ev["channel"], ev["begin"]
             with _index_lock:
                 _index_job["label"] = f"{ch} @ {ts}"
-            if not faceindex.event_done(ch, ts):
-                try:
-                    secs = min(max(int(ev.get("duration_s", 10)), 6), 20)
-                    kept: list[np.ndarray] = []   # embeddings already stored this event
-                    for img in _frames_bgr(ch, ts, secs=secs):
-                        h, w = img.shape[:2]
-                        for f in faceslib.detect(img, min_score=0.80):
-                            x1, y1, x2, y2 = f["bbox"]
-                            x1, y1 = max(0, x1), max(0, y1)
-                            x2, y2 = min(w, x2), min(h, y2)
-                            if x2 - x1 < 32 or y2 - y1 < 32:   # drop tiny/low-quality faces
-                                continue
-                            emb = f["embedding"]
-                            # within-event dedup: skip a face very similar to one we
-                            # already saved for this same event (same person, next frame)
-                            if any(float(np.dot(emb, k)) > 0.5 for k in kept):
-                                continue
-                            crop = img[y1:y2, x1:x2]
-                            ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 88])
-                            if not ok:
-                                continue
-                            faceindex.add_face(ch, ts, emb, buf.tobytes(), f["score"])
-                            kept.append(emb)
-                            with _index_lock:
-                                _index_job["faces"] += 1
-                except Exception:
-                    pass
-                faceindex.mark_event(ch, ts)
+            try:
+                found = _scan_event(ch, ts, int(ev.get("duration_s", 10)))
+            except Exception as e:
+                print(f"[scan] {ch} {ts}: {e}", flush=True)
+                found = 0
             with _index_lock:
+                _index_job["faces"] += found
                 _index_job["done"] += 1
+        faceindex.auto_merge()
     except Exception as e:
         with _index_lock:
             _index_job["error"] = str(e)
@@ -1294,6 +1383,45 @@ def faces_label(pid: int, body: PersonLabel) -> dict[str, Any]:
     _require_faces()
     faceindex.rename_person(pid, body.label.strip())
     return {"ok": True}
+
+
+class MergeBody(BaseModel):
+    into: int
+
+
+@app.post("/api/faces/person/{pid}/merge")
+def faces_merge(pid: int, body: MergeBody) -> dict[str, Any]:
+    """Fold person `pid` into person `into` (same person, split by the clustering)."""
+    _require_faces()
+    try:
+        faceindex.merge_people(pid, body.into)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="no such person")
+    return {"ok": True, "into": body.into}
+
+
+@app.get("/api/faces/person/{pid}/similar")
+def faces_similar(pid: int) -> dict[str, Any]:
+    _require_faces()
+    return {"people": faceindex.similar(pid)}
+
+
+@app.get("/api/visitors")
+def visitors(date: str) -> dict[str, Any]:
+    """People seen on a day (one row per motion/alarm event with a person), plus
+    how much of the day the background scan has covered."""
+    _require_faces()
+    events = len(_day_events(date)) if date else 0
+    return {**visitorindex.day(date), "events": events, "backfill_days": BACKFILL_DAYS}
+
+
+@app.get("/api/visitors/img/{vid}")
+def visitor_img(vid: int) -> Response:
+    _require_faces()
+    p = visitorindex.crop_path(vid)
+    if not p or not p.exists():
+        raise HTTPException(status_code=404, detail="no such visit")
+    return FileResponse(p, media_type="image/jpeg", headers=_THUMB_HEADERS)
 
 
 # Config sections to offer in the editor, grouped for the UI. Probed against the

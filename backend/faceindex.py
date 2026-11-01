@@ -170,3 +170,72 @@ def stats() -> dict:
         p = c.execute("SELECT COUNT(*) n FROM people").fetchone()["n"]
         ev = c.execute("SELECT COUNT(*) n FROM seen_events").fetchone()["n"]
     return {"faces": f, "people": p, "events_processed": ev}
+
+
+def _mean(row) -> np.ndarray:
+    m = np.frombuffer(row["centroid"], dtype=np.float32) / max(row["count"], 1)
+    n = np.linalg.norm(m)
+    return m / n if n else m
+
+
+def merge_people(src: int, dst: int) -> None:
+    """Fold person `src` into `dst`: faces, centroid sum, count, avatar, name."""
+    if src == dst:
+        return
+    with _lock, _conn() as c:
+        a = c.execute("SELECT * FROM people WHERE id=?", (src,)).fetchone()
+        b = c.execute("SELECT * FROM people WHERE id=?", (dst,)).fetchone()
+        if not a or not b:
+            raise KeyError("no such person")
+        total = (np.frombuffer(a["centroid"], dtype=np.float32) + np.frombuffer(b["centroid"], dtype=np.float32))
+        rep, rep_score = (a["rep_face_id"], a["rep_score"]) if (a["rep_score"] or 0) > (b["rep_score"] or 0) \
+            else (b["rep_face_id"], b["rep_score"])
+        c.execute("UPDATE faces SET person_id=? WHERE person_id=?", (dst, src))
+        c.execute("UPDATE people SET centroid=?, count=?, rep_face_id=?, rep_score=?, label=? WHERE id=?",
+                  (total.astype(np.float32).tobytes(), a["count"] + b["count"], rep, rep_score,
+                   b["label"] or a["label"], dst))
+        c.execute("DELETE FROM people WHERE id=?", (src,))
+
+
+# Two clusters of the same person have similar average faces (side views of one
+# person scored 0.34-0.50 on real data, a different person <= 0.12). Above this the
+# smaller one is folded into the bigger one automatically (stricter than the
+# per-face SIM_THRESHOLD, since averages are smoother than single faces).
+AUTO_MERGE = float(os.environ.get("FACE_AUTO_MERGE", "0.32"))
+
+
+def auto_merge() -> int:
+    """Merge people whose average faces are clearly the same person. Never merges
+    two people that both have (different) names. Returns how many merges ran."""
+    merged = 0
+    while True:
+        with _conn() as c:
+            rows = c.execute("SELECT id, label, centroid, count FROM people").fetchall()
+        best = None
+        means = [(r, _mean(r)) for r in rows]
+        for i in range(len(means)):
+            for j in range(i + 1, len(means)):
+                (ra, ma), (rb, mb) = means[i], means[j]
+                if ra["label"] and rb["label"] and ra["label"] != rb["label"]:
+                    continue
+                sim = float(np.dot(ma, mb))
+                if sim >= AUTO_MERGE and (best is None or sim > best[0]):
+                    big, small = (ra, rb) if ra["count"] >= rb["count"] else (rb, ra)
+                    best = (sim, small["id"], big["id"])
+        if not best:
+            return merged
+        merge_people(best[1], best[2])
+        merged += 1
+
+
+def similar(person_id: int, limit: int = 8) -> list[dict]:
+    """Other people ordered by how alike their average face is (for 'Merge into')."""
+    with _conn() as c:
+        rows = c.execute("SELECT id, label, centroid, count, rep_face_id FROM people").fetchall()
+    me = next((r for r in rows if r["id"] == person_id), None)
+    if me is None:
+        return []
+    m = _mean(me)
+    out = [{"id": r["id"], "label": r["label"], "count": r["count"], "rep_face_id": r["rep_face_id"],
+            "similarity": round(float(np.dot(m, _mean(r))), 3)} for r in rows if r["id"] != person_id]
+    return sorted(out, key=lambda x: -x["similarity"])[:limit]

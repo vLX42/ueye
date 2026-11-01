@@ -518,14 +518,74 @@ async function saveSection() {
 // ============================================================================
 //  PEOPLE — face sorting (CPU, hybrid: motion events -> faces -> clusters)
 // ============================================================================
-let peopleInit = false;
+let peopleInit = false, peopleTab = 'visitors';
 function onPeopleShown() {
   if (!peopleInit) {
     peopleInit = true;
     $('#fx-date').value = REC.date || todayISO();
     $('#fx-index').onclick = indexFaces;
+    $('#fx-date').onchange = () => loadVisitors();
+    const shift = d => { const t = new Date($('#fx-date').value + 'T12:00'); t.setDate(t.getDate() + d);
+      $('#fx-date').value = t.toISOString().slice(0, 10); loadVisitors(); };
+    $('#fx-prev').onclick = () => shift(-1);
+    $('#fx-next').onclick = () => shift(1);
+    $$('[data-ptab]').forEach(b => b.onclick = () => showPeopleTab(b.dataset.ptab));
   }
-  loadPeople();
+  showPeopleTab(peopleTab);
+}
+function showPeopleTab(tab) {
+  peopleTab = tab;
+  $$('[data-ptab]').forEach(b => b.classList.toggle('on', b.dataset.ptab === tab));
+  $('#px-visitors').classList.toggle('hidden', tab !== 'visitors');
+  $('#px-faces').classList.toggle('hidden', tab !== 'faces');
+  if (tab === 'visitors') loadVisitors(); else loadPeople();
+}
+
+// --- visitors: who came by (person detection), grouped into visits --------------
+const VISIT_GAP = 180;   // s: alerts closer than this are one visit
+async function loadVisitors() {
+  const box = $('#vx-list'), date = $('#fx-date').value, st = $('#fx-status');
+  let r;
+  try { r = await api(`/visitors?date=${date}`); }
+  catch (e) { box.innerHTML = `<p class="empty">Error: ${e.message}</p>`; return; }
+  if ($('#fx-date').value !== date) return;
+  const age = (new Date(todayISO()) - new Date(date)) / 86400000;
+  st.textContent = r.events ? (r.scanned >= r.events ? `${r.events} alerts scanned`
+    : age < r.backfill_days ? `Scanned ${r.scanned} of ${r.events} alerts · the rest is scanning in the background`
+    : `Scanned ${r.scanned} of ${r.events} alerts · press Scan this day for the rest`) : 'No alerts on this day';
+  // group into visits
+  const visits = [];
+  for (const v of r.visits) {
+    const t = secOfDay(v.ts), last = visits[visits.length - 1];
+    if (last && t - last.end <= VISIT_GAP) { last.items.push(v); last.end = t; }
+    else visits.push({ start: t, end: t, items: [v] });
+  }
+  if (!visits.length) { box.innerHTML = `<p class="empty">${r.scanned ? 'Nobody seen on this day.' : 'Not scanned yet.'}</p>`; return; }
+  box.innerHTML = '';
+  for (const vis of visits.reverse()) {           // newest first
+    const best = vis.items.reduce((a, b) => (b.score > a.score ? b : a));
+    const cams = [...new Set(vis.items.map(v => chName(v.channel)))].join(', ');
+    const n = Math.max(...vis.items.map(v => v.persons));
+    const card = el('div', 'vx-card');
+    const img = el('img', 'vx-img'); img.src = `/api/visitors/img/${best.id}`; img.alt = ''; img.loading = 'lazy';
+    const a5 = fmtClock(vis.start).slice(0, 5), b5 = fmtClock(vis.end).slice(0, 5);
+    const when = a5 === b5 ? fmtClock(vis.start) : `${a5}–${b5}`;
+    const meta = el('div', 'vx-meta');
+    meta.innerHTML = `<strong>${when}</strong><span class="ev-sub">${cams}${n > 1 ? ` · ${n} people` : ''}${vis.items.length > 1 ? ` · ${vis.items.length} alerts` : ''}</span>`;
+    card.append(img, meta);
+    if (vis.items.length > 1) {                   // the other shots of this visit
+      const strip = el('div', 'vx-strip');
+      for (const v of vis.items) {
+        const t = el('img'); t.src = `/api/visitors/img/${v.id}`; t.alt = ''; t.loading = 'lazy';
+        t.title = `${fmtClock(secOfDay(v.ts))} · ${chName(v.channel)}`;
+        t.onclick = e => { e.stopPropagation(); playAt(v.channel, v.ts); };
+        strip.appendChild(t);
+      }
+      card.appendChild(strip);
+    }
+    card.onclick = () => playAt(vis.items[0].channel, vis.items[0].ts);
+    box.appendChild(card);
+  }
 }
 async function loadPeople() {
   const box = $('#fx-people');
@@ -547,6 +607,9 @@ async function loadPeople() {
   }
 }
 async function openPerson(pid, label) {
+  if (label === undefined) {
+    try { label = ((await api('/faces/people')).people.find(p => p.id === pid) || {}).label; } catch { label = ''; }
+  }
   const box = $('#fx-detail');
   box.classList.remove('hidden');
   box.innerHTML = '<p class="empty">Loading…</p>';
@@ -559,6 +622,29 @@ async function openPerson(pid, label) {
   const close = el('button', 'pb-btn', '✕'); close.onclick = () => box.classList.add('hidden');
   head.append(el('h3', null, `${faces.length} sightings`), nameIn, saveName, close);
   box.appendChild(head);
+  // merge: the clustering sometimes splits one person into two groups
+  const mergeRow = el('div', 'fx-merge');
+  const sel = el('select', 'cfg-input');
+  sel.innerHTML = '<option value="">Merge into…</option>';
+  const mergeBtn = el('button', 'pb-btn', 'Merge');
+  mergeBtn.disabled = true;
+  sel.onchange = () => { mergeBtn.disabled = !sel.value; };
+  mergeBtn.onclick = async () => {
+    mergeBtn.disabled = true;
+    try {
+      await api(`/faces/person/${pid}/merge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ into: Number(sel.value) }) });
+      setStatus('Merged'); box.classList.add('hidden'); await loadPeople(); openPerson(Number(sel.value));
+    } catch (e) { setStatus('Merge failed: ' + e.message); mergeBtn.disabled = false; }
+  };
+  mergeRow.append(sel, mergeBtn, el('span', 'fx-sub', 'most alike first'));
+  box.appendChild(mergeRow);
+  api(`/faces/person/${pid}/similar`).then(({ people }) => {
+    for (const p of people) {
+      const o = el('option'); o.value = p.id;
+      o.textContent = `${p.label || 'Person ' + p.id} (${p.count}) · ${Math.round(Math.max(0, p.similarity) * 100)}% alike`;
+      sel.appendChild(o);
+    }
+  }).catch(() => {});
   const grid = el('div', 'fx-grid');
   for (const f of faces) {
     const card = el('div', 'fx-person');
@@ -595,7 +681,7 @@ async function indexFaces() {
       if (!s.running) {
         clearInterval(poll);
         st.textContent = s.error ? `Error: ${s.error}` : `Done · ${s.faces} faces · ${s.people} people total`;
-        loadPeople();
+        if (peopleTab === 'visitors') loadVisitors(); else loadPeople();
       }
     } catch (e) { clearInterval(poll); st.textContent = 'Error: ' + e.message; }
   }, 1500);

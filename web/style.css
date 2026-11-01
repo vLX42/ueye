@@ -304,3 +304,17 @@ video-stream .info .mode { display: none; }
   content: "no preview"; position: absolute; left: 0; right: 0; top: 0; aspect-ratio: 16/9;
   display: grid; place-items: center; color: var(--muted); font-size: .72rem; pointer-events: none;
 }
+
+/* people: visitors */
+.px-tabs { margin-right: .4rem; }
+.vx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: .7rem; margin-top: .8rem; }
+.vx-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; cursor: pointer; display: flex; flex-direction: column; }
+.vx-card:hover { border-color: var(--accent); }
+.vx-img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; object-position: top; background: #000; display: block; }
+.vx-meta { padding: .45rem .55rem; display: flex; flex-direction: column; gap: .1rem; }
+.vx-meta strong { font-variant-numeric: tabular-nums; }
+.vx-strip { display: flex; gap: 3px; padding: 0 .55rem .55rem; overflow-x: auto; }
+.vx-strip img { width: 34px; height: 44px; object-fit: cover; object-position: top; border-radius: 4px; background: #000; flex: none; }
+.vx-strip img:hover { outline: 2px solid var(--accent); }
+.fx-merge { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .2rem 0 .8rem; }
+.fx-merge select { max-width: 280px; }

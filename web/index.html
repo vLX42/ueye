@@ -17,7 +17,7 @@
        works fully offline. Loaded before style.css so the hand-written component
        styles win on any conflict. -->
   <link rel="stylesheet" href="tailwind.css?v=19" />
-  <link rel="stylesheet" href="style.css?v=31" />
+  <link rel="stylesheet" href="style.css?v=32" />
   <!-- go2rtc web component: <video-stream> handles MSE/WebRTC fallback -->
   <script type="module" src="/go2rtc/video-stream.js"></script>
 </head>
@@ -116,15 +116,24 @@
 
     <section id="people" class="view">
       <div class="rec-toolbar">
+        <span class="pb-qual px-tabs"><button class="pb-q on" data-ptab="visitors">Visitors</button><button class="pb-q" data-ptab="faces">Faces</button></span>
         <div class="rec-daynav">
+          <button id="fx-prev" title="Previous day">◀</button>
           <input type="date" id="fx-date" />
-          <button id="fx-index" class="pb-btn">Scan this day for faces</button>
+          <button id="fx-next" title="Next day">▶</button>
+          <button id="fx-index" class="pb-btn" title="Scan this day's alerts for people and faces now">Scan this day</button>
         </div>
         <span id="fx-status" class="status"></span>
       </div>
-      <p class="hint">Faces are detected from motion events and grouped by person (runs on the NAS, CPU only). Click a person to see every sighting; click a sighting to jump to that moment in Recordings.</p>
-      <div id="fx-people" class="fx-grid"><p class="empty">No people yet. Scan a day to start.</p></div>
-      <div id="fx-detail" class="fx-detail hidden"></div>
+      <div id="px-visitors">
+        <p class="hint">Everyone the cameras saw, one card per visit (alerts within 3 minutes are grouped). New alerts are scanned automatically in the background; the last 7 days are covered. Click a card to watch it.</p>
+        <div id="vx-list" class="vx-grid"><p class="empty">Loading…</p></div>
+      </div>
+      <div id="px-faces" class="hidden">
+        <p class="hint">Faces grouped by person. The same person can end up in two groups: open one and use <b>Merge into</b>. Click a sighting to jump to that moment in Recordings.</p>
+        <div id="fx-people" class="fx-grid"><p class="empty">No faces yet.</p></div>
+        <div id="fx-detail" class="fx-detail hidden"></div>
+      </div>
     </section>
 
     <section id="settings" class="view">
@@ -135,6 +144,6 @@
     </section>
   </main>
 
-  <script src="app.js?v=33"></script>
+  <script src="app.js?v=34"></script>
 </body>
 </html>
