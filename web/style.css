@@ -139,7 +139,10 @@ select, input[type=date] {
 .rec-player { background: #000; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-bottom: 1rem; }
 .rec-video-box { position: relative; background: #000; display: flex; justify-content: center; }
 /* cap height so the player + timeline both stay on screen; letterbox if needed */
-#rec-video { width: 100%; max-height: 44vh; display: block; background: #000; object-fit: contain; }
+/* Fixed 16:9 box (the cameras are 3840x2160). Without it the element falls back
+   to the browser's 300x150 default every time a new clip loads, and the whole
+   page jumps when the real size arrives. */
+#rec-video { width: 100%; aspect-ratio: 16 / 9; height: auto; max-height: 44vh; display: block; background: #000; object-fit: contain; }
 /* Fullscreen: the box fills the screen and the video drops its 44vh cap
    (the mobile 38vh rule is overridden too, hence the id+pseudo specificity). */
 .rec-video-box:fullscreen { width: 100vw; height: 100vh; align-items: center; }
