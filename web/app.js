@@ -912,15 +912,37 @@ function showHover(x, ch) {
 function hideHover() { clearTimeout(hoverTimer); $('#tl-hover').classList.add('hidden'); $('#tl-thumb').classList.add('hidden'); }
 
 // --- events rail (lazy thumbnails) ------------------------------------------
+// Thumbnails load through a small queue: at most 2 at a time, and none while a
+// clip is starting. Unthrottled, a screenful of cards took every browser
+// connection (6 per host) and the clicked clip queued behind them.
+const THUMBQ = { q: [], active: 0, paused: false, resumeTimer: null, loaded: new Set() };
+function pumpThumbs() {
+  while (!THUMBQ.paused && THUMBQ.active < 2 && THUMBQ.q.length) {
+    const img = THUMBQ.q.shift();
+    if (!img.isConnected) continue;
+    THUMBQ.active++;
+    img.onerror = () => { THUMBQ.active--; pumpThumbs(); };
+    img.onload = () => { THUMBQ.loaded.add(img.src); THUMBQ.active--; pumpThumbs(); };
+    img.src = img.dataset.src;
+  }
+}
+function pauseThumbs() {            // a clip is starting: give it the connections
+  THUMBQ.paused = true;
+  clearTimeout(THUMBQ.resumeTimer);
+  THUMBQ.resumeTimer = setTimeout(resumeThumbs, 8000);   // never stay paused forever
+}
+function resumeThumbs() { clearTimeout(THUMBQ.resumeTimer); THUMBQ.paused = false; pumpThumbs(); }
 let thumbObserver = null;
 function renderEvents() {
   const box = $('#rec-events'); box.innerHTML = '';
   const evs = REC.events.filter(e => REC.filter.has(e.type));
   if (!evs.length) { box.innerHTML = '<p class="empty">No motion or alarm events on this day.</p>'; return; }
   if (thumbObserver) thumbObserver.disconnect();
+  THUMBQ.q = [];
   thumbObserver = new IntersectionObserver(ents => {
     for (const en of ents) if (en.isIntersecting) {
-      const img = en.target; img.src = img.dataset.src; thumbObserver.unobserve(img);
+      const img = en.target; THUMBQ.q.push(img); thumbObserver.unobserve(img);
+      pumpThumbs();
     }
   }, { root: box, rootMargin: '200px' });
   for (const ev of evs) {
@@ -947,12 +969,14 @@ function seekTo(ch, sec) {
   sec = Math.max(0, Math.min(DAY - 1, Math.floor(sec)));
   if (!hasFootage(ch, sec)) { const n = nextFootage(ch, sec); if (n == null) { setStatus('No footage there'); return; } sec = n; }
   REC.play.ch = ch; REC.play.chunkStart = sec; REC.play.prefetched = null;
+  pauseThumbs();
   $('#rec-player').classList.remove('hidden');
   spinner(true);
   const v = $('#rec-video');
-  // show the moment's thumbnail instantly (often already cached from hover) as a
-  // poster so the player isn't blank while the chunk downloads
-  v.poster = `/api/thumb?channel=${ch}&time=${encodeURIComponent(REC.date + ' ' + fmtClock(sec))}`;
+  // Poster only when that thumbnail is already in the browser cache: fetching a
+  // fresh one costs an NVR pull that competes with the clip itself.
+  const poster = new URL(`/api/thumb?channel=${ch}&time=${encodeURIComponent(REC.date + ' ' + fmtClock(sec))}`, location.href).href;
+  if (THUMBQ.loaded.has(poster)) v.poster = poster; else v.removeAttribute('poster');
   v.src = clipUrl(ch, sec);
   v.playbackRate = Number($('#pb-rate').value);
   v.play().catch(() => {});
@@ -1045,7 +1069,8 @@ function bindPlayer() {
   };
   v.onplay = () => $('#pb-play').textContent = '❚❚';
   v.onpause = () => $('#pb-play').textContent = '▶';
-  v.onplaying = () => spinner(false);
+  v.onplaying = () => { spinner(false); resumeThumbs(); };
+  v.onerror = () => resumeThumbs();
   v.onloadeddata = () => spinner(false);
   v.onwaiting = () => spinner(true);
 

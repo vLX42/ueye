@@ -162,7 +162,9 @@ def _ffmpeg_pipe(dl, demux, first: bytes, codec: str, scale: int, preset: str,
     stream ends or the client disconnects. With stop_at, the download ends at the
     first I-frame stamped at/after it instead of waiting for the idle timeout."""
     in_fmt = "hevc" if codec == "hevc" else "h264"
-    mov = ["-movflags", "frag_keyframe+empty_moov+faststart+default_base_moof",
+    # frag_duration: ship a fragment every 0.5s instead of waiting for the NEXT
+    # keyframe (2s GOP) to close the first one; the browser starts sooner.
+    mov = ["-movflags", "frag_keyframe+empty_moov+faststart+default_base_moof", "-frag_duration", "500000",
            "-an", "-f", "mp4", "pipe:1"]
     if copy:
         # Original stream, no decode: ~0.2s CPU per chunk vs 20-40s to transcode
@@ -177,7 +179,7 @@ def _ffmpeg_pipe(dl, demux, first: bytes, codec: str, scale: int, preset: str,
         vf = ["-vf", f"scale='min({scale},iw)':-2"] if scale else []
         args = ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", in_fmt, "-i", "pipe:0",
                 *ss, *tt, *vf, "-c:v", "libx264", "-preset", preset, "-tune", "zerolatency",
-                "-pix_fmt", "yuv420p", "-g", "30", "-avoid_negative_ts", "make_zero",
+                "-pix_fmt", "yuv420p", "-g", "10", "-avoid_negative_ts", "make_zero",
                 *mov]
     proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL)
@@ -642,6 +644,10 @@ def clip(channel: int, start: str, duration: int = 90,
         raise HTTPException(status_code=404, detail="no footage at that time")
     end = min(end, rec["end"])            # clamp the slice to the covering file
     dl_start, trim = _padded(rec, start)  # pad start so the first GOP is clean
+    if copy:
+        # Stream copy starts at the first keyframe AT/AFTER `start` (no decode, so
+        # no pre-roll to warm up): downloading the PAD seconds before it was waste.
+        dl_start = max(start, rec["begin"])
     # Stream the NVR download straight through the demux + transcode so the browser
     # gets the first fragment after the opening GOP arrives (~2-3s) instead of after
     # the whole slice downloads (~7-8s). The concurrency cap is held for the life of
