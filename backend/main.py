@@ -709,7 +709,7 @@ QUALITY = {
 
 
 @app.get("/api/clip")
-def clip(channel: int, start: str, duration: int = 90,
+def clip(request: Request, channel: int, start: str, duration: int = 90,
          transcode: int = 1, q: str = "hd") -> Response:
     """Play an arbitrary TIME WINDOW of a camera as MP4 (ByTime seek).
 
@@ -801,7 +801,28 @@ def clip(channel: int, start: str, duration: int = 90,
                        trim=trim, client=client, sem=_PLAYBACK_SEM,
                        stop_at=datetime.strptime(end, _FMT), copy=copy,
                        length=(datetime.strptime(end, _FMT) - datetime.strptime(start, _FMT)).total_seconds())
+    if _wants_byte_ranges(request):
+        # Safari (iPhone/iPad/Mac) opens a video with "Range: bytes=0-1" and only
+        # plays if it gets a 206 with the total size. A live stream has no size
+        # yet, and Safari hanging up after its 2 bytes counted as an abandoned
+        # clip, so nothing got cached and it took several taps to play. Build the
+        # chunk into the cache first, then serve the file (FileResponse does
+        # ranges). Chrome/Firefox send "bytes=0-" and keep the streaming path.
+        async def _drain():
+            async for _ in gen():
+                pass
+        asyncio.run(_drain())
+        if cache.exists() and cache.stat().st_size > 0:
+            return FileResponse(cache, media_type="video/mp4")
+        raise HTTPException(status_code=404, detail="no footage at that time")
     return StreamingResponse(gen(), media_type="video/mp4")
+
+
+def _wants_byte_ranges(request: Request) -> bool:
+    """True for a bounded byte-range request (Safari's media probe), not for the
+    open-ended "bytes=0-" that Chrome/Firefox send."""
+    r = request.headers.get("range", "").replace(" ", "").lower()
+    return r.startswith("bytes=") and r != "bytes=0-"
 
 
 # --- export: a time range of one camera as a downloadable MP4 ----------------
