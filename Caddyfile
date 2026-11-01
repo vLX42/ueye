@@ -1,27 +1,71 @@
 # Single front door. Everything on one port (8080 inside the container).
+#
+# Home vs outside: NPM (the outer reverse proxy) sends the real client IP in
+# X-Real-IP. We trust that header only from UEYE_TRUSTED_PROXIES, then treat
+# clients in UEYE_HOME_NETS as "home" (no login). Everyone else needs the
+# session cookie from /login.html (checked by FastAPI via forward_auth).
 {
 	admin off
 	auto_https off
+	servers {
+		trusted_proxies static {$UEYE_TRUSTED_PROXIES:private_ranges}
+		client_ip_headers X-Real-IP X-Forwarded-For
+	}
 }
 
 :8080 {
 	encode gzip
 
-	# REST API -> FastAPI (uvicorn)
-	handle /api/* {
-		reverse_proxy 127.0.0.1:8000
+	@outside not client_ip {$UEYE_HOME_NETS:private_ranges}
+
+	# Outside: everything except the login page + what it needs is behind auth.
+	@outside_locked {
+		not client_ip {$UEYE_HOME_NETS:private_ranges}
+		not path /login.html /api/auth/login /api/auth/status /manifest.webmanifest /icons/* /tailwind.css /style.css /sw.js
+	}
+	forward_auth @outside_locked 127.0.0.1:8000 {
+		uri /api/auth/check
+		header_up X-Client-IP {client_ip}
+		# The check itself is a plain GET even when guarding a websocket
+		# (live video / talk); otherwise uvicorn treats it as a WS handshake.
+		header_up -Connection
+		header_up -Upgrade
+		header_up -Sec-WebSocket-*
 	}
 
-	# Live video (MSE / WebRTC / HLS + WebSocket signalling) -> go2rtc
-	handle_path /go2rtc/* {
-		reverse_proxy 127.0.0.1:1984
+	# Outside: only the go2rtc bits the UI uses. The rest of its API (e.g.
+	# /api/streams) exposes the NVR source URL including the password.
+	@go2rtc_outside_blocked {
+		not client_ip {$UEYE_HOME_NETS:private_ranges}
+		path /go2rtc/*
+		not path /go2rtc/video-stream.js /go2rtc/video-rtc.js /go2rtc/api/ws /go2rtc/api/frame.jpeg
 	}
 
-	# Static web UI
-	handle {
-		root * /app/web
-		try_files {path} /index.html
-		header Cache-Control "no-store"
-		file_server
+	route {
+		respond @go2rtc_outside_blocked 403
+
+		# REST API -> FastAPI (uvicorn)
+		handle /api/* {
+			reverse_proxy 127.0.0.1:8000 {
+				header_up X-Client-IP {client_ip}
+				header_up X-Ueye-Home {vars.home}
+			}
+		}
+
+		# Live video (MSE / WebRTC / HLS + WebSocket signalling) -> go2rtc
+		handle_path /go2rtc/* {
+			reverse_proxy 127.0.0.1:1984
+		}
+
+		# Static web UI
+		handle {
+			root * /app/web
+			try_files {path} /index.html
+			header Cache-Control "no-store"
+			file_server
+		}
 	}
+
+	vars home 1
+	vars @outside home 0
 }

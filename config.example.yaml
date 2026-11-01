@@ -11,3 +11,12 @@ channels:
   - { id: 1, name: "Driveway" }
   - { id: 2, name: "Garden" }
   - { id: 3, name: "Garage" }
+
+# Login for access from OUTSIDE the home network (e.g. https://ueye.example.com
+# via a reverse proxy). Clients on private/LAN addresses never see a login.
+# Leave empty to refuse all outside access. Env UEYE_PASSWORD overrides this.
+# Advanced (container env): UEYE_HOME_NETS = networks that skip the login,
+# UEYE_TRUSTED_PROXIES = proxies whose X-Real-IP is trusted (both default to
+# private_ranges).
+auth:
+  password: ""

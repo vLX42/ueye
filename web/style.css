@@ -231,3 +231,12 @@ select, input[type=date] {
 .fx-sub { font-size: .72rem; color: var(--muted); padding: 0 .3rem .4rem; }
 .fx-detail { margin-top: 1.4rem; border-top: 1px solid var(--line); padding-top: 1rem; }
 .fx-detail .cfg-head { gap: .5rem; }
+
+/* Home-screen app on iPhone (black-translucent status bar + viewport-fit=cover):
+   keep the header and content clear of the notch / home indicator. */
+header.sticky {
+  padding-top: max(.5rem, env(safe-area-inset-top));
+  padding-left: max(.75rem, env(safe-area-inset-left));
+  padding-right: max(.75rem, env(safe-area-inset-right));
+}
+main.mx-auto { padding-bottom: max(.75rem, env(safe-area-inset-bottom)); }

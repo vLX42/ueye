@@ -1055,3 +1055,6 @@ async function boot() {
   bindPlayer();
 }
 boot();
+
+// Installable app (PWA): register the no-op service worker.
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

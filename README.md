@@ -69,6 +69,19 @@ see `backend/dvrip.py` (verified against the canonical `""` → `tlJwpbo6`).
    mount your `config.yaml` at `/config/config.yaml`.)
 3. Open `http://<nas-ip>:8080`.
 
+## Outside access + iPhone app
+
+- **At home** (private/LAN IPs) there is no login.
+- **From outside** (through a reverse proxy like Nginx Proxy Manager that sends
+  `X-Real-IP`) everything is behind a login page. Set `auth.password` in
+  `config.yaml`; with no password, outside access is refused. Sessions last 180
+  days; delete `/config/auth_secret` to log every device out. 5 wrong passwords
+  per IP locks that IP out for 15 minutes.
+- go2rtc's own API (which shows the NVR URL incl. password) is blocked from
+  outside even when logged in; only the live-video endpoints the UI uses pass.
+- **iPhone:** open the site in Safari → Share → *Add to Home Screen*. It runs
+  full screen with its own icon. No App Store / developer account needed.
+
 ## What works
 
 Confirmed against a real recorder (Xiongmai NBD80S16S-KL):

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0f14" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="uEye" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <title>uEye login</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b0f14;
+           color: #e8eef5; font: 16px/1.4 -apple-system, system-ui, sans-serif; padding: 16px; box-sizing: border-box; }
+    form { width: 100%; max-width: 320px; display: flex; flex-direction: column; gap: 12px; text-align: center; }
+    img { width: 72px; height: 72px; border-radius: 16px; margin: 0 auto 4px; }
+    h1 { margin: 0; color: #2dd4bf; font-size: 1.4rem; font-weight: 600; }
+    p { margin: 0; color: #7d8da0; font-size: .9rem; }
+    input, button { font: inherit; font-size: 16px; padding: 12px 14px; border-radius: 10px; border: 1px solid #1f2a3a; }
+    input { background: #121926; color: #e8eef5; }
+    input:focus { outline: 2px solid #2dd4bf; outline-offset: -1px; }
+    button { background: #2dd4bf; color: #0b0f14; font-weight: 600; border: 0; cursor: pointer; }
+    button:disabled { opacity: .6; }
+    #err { color: #f87171; min-height: 1.4em; }
+  </style>
+</head>
+<body>
+  <form id="f">
+    <img src="/icons/icon-192.png" alt="" />
+    <h1>uEye</h1>
+    <p>You're outside your home network, so a password is needed.</p>
+    <input id="pw" type="password" autocomplete="current-password" placeholder="Password" required autofocus />
+    <button id="go" type="submit">Log in</button>
+    <div id="err" role="alert"></div>
+  </form>
+  <script>
+    const next = (() => {
+      const n = new URLSearchParams(location.search).get('next') || '/';
+      return n.startsWith('/') && !n.startsWith('//') ? n : '/';
+    })();
+    // At home no login is needed: go straight back to the app.
+    fetch('/api/auth/status').then(r => r.json()).then(s => {
+      if (s.home || s.logged_in) location.replace(next);
+    }).catch(() => {});
+    document.getElementById('f').addEventListener('submit', async e => {
+      e.preventDefault();
+      const btn = document.getElementById('go'), err = document.getElementById('err');
+      btn.disabled = true; err.textContent = '';
+      try {
+        const r = await fetch('/api/auth/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: document.getElementById('pw').value }),
+        });
+        if (r.ok) { location.replace(next); return; }
+        err.textContent = (await r.json().catch(() => ({}))).detail || `Login failed (${r.status})`;
+      } catch { err.textContent = 'Network error'; }
+      btn.disabled = false;
+    });
+  </script>
+</body>
+</html>

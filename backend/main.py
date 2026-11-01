@@ -31,6 +31,7 @@ from config import AppConfig  # noqa: E402
 from dvrip import DVRIPClient, DVRIPError  # noqa: E402
 import audiogen  # noqa: E402
 import sofia  # noqa: E402
+import auth  # noqa: E402
 
 # Face sorting is optional: if the CV stack isn't installed the rest of the API
 # still works and the face endpoints report unavailable.
@@ -46,6 +47,7 @@ except Exception as _face_err:  # pragma: no cover
     _FACE_IMPORT_ERR = str(_face_err)
 
 app = FastAPI(title="uEye", version="0.1.0")
+app.include_router(auth.router)
 CFG = AppConfig.load()
 
 # The NVR allows only a few concurrent playback streams. Cap how many ByTime
