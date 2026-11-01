@@ -574,7 +574,7 @@ async function renderGrid() {
   }
 }
 
-// --- talk controls: Halloween sound + hold-to-talk --------------------------
+// --- talk controls: seasonal sound + hold-to-talk ---------------------------
 // One talk session at a time (the NVR routes talk through a single intercom
 // path), so a global flag greys out every other talk control while one runs.
 let TALK_BUSY = false;
@@ -585,27 +585,36 @@ function setTalkBusy(on) {
   });
 }
 
+// The sound button follows the calendar (Christmas until 25 Dec, then New
+// Year, ...): the server says which season it is and picks a random sound.
+let SEASON = { emoji: '🔔', label: 'Fun' };
+const seasonReady = api('/talk/sounds').then(r => {
+  SEASON = r.season;
+  $$('.talk-season').forEach(b => { b.textContent = SEASON.emoji; b.title = `Play a ${SEASON.label} sound on this camera`; });
+}).catch(() => {});
+
 function buildTalkBar(channel) {
   const bar = el('div', 'talk-bar');
 
-  const pumpkin = el('button', 'talk-btn talk-pumpkin', '🎃');
-  pumpkin.title = 'Play a Halloween sound on this camera';
-  pumpkin.onclick = async () => {
+  const fun = el('button', 'talk-btn talk-season', SEASON.emoji);
+  fun.title = `Play a ${SEASON.label} sound on this camera`;
+  fun.onclick = async () => {
     if (TALK_BUSY) return;
     setTalkBusy(true);
-    pumpkin.classList.add('talk-active');
-    pumpkin.textContent = '🔊';
+    fun.classList.add('talk-active');
+    fun.textContent = '🔊';
     try {
-      await api('/talk/sound', {
+      const r = await api('/talk/sound', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channel, sound: 'halloween' }),
+        body: JSON.stringify({ channel, sound: 'season' }),
       });
+      setStatus(`Played ${r.label} on ${chName(channel)}`);
     } catch (e) {
-      setStatus(`Halloween sound failed: ${e.message}`, true);
+      setStatus(`Sound failed: ${e.message}`, true);
     } finally {
-      pumpkin.classList.remove('talk-active');
-      pumpkin.textContent = '🎃';
+      fun.classList.remove('talk-active');
+      fun.textContent = SEASON.emoji;
       setTalkBusy(false);
     }
   };
@@ -614,7 +623,7 @@ function buildTalkBar(channel) {
   ptt.title = 'Hold to talk to this camera';
   wirePushToTalk(ptt, channel);
 
-  bar.append(pumpkin, ptt);
+  bar.append(fun, ptt);
   return bar;
 }
 

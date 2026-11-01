@@ -32,6 +32,7 @@ from dvrip import DVRIPClient, DVRIPError, SYSINFO_REQ  # noqa: E402
 import audiogen  # noqa: E402
 import sofia  # noqa: E402
 import auth  # noqa: E402
+import seasons  # noqa: E402
 
 # Face sorting is optional: if the CV stack isn't installed the rest of the API
 # still works and the face endpoints report unavailable.
@@ -1214,16 +1215,20 @@ class TalkSound(BaseModel):
 
 @app.get("/api/talk/sounds")
 def talk_sounds() -> dict[str, Any]:
-    return {"sounds": [{"id": k, "label": v[0]} for k, v in audiogen.SOUNDS.items()]}
+    """The current season (emoji + its sounds) for the live-view sound button,
+    plus every sound id that can be played explicitly."""
+    return {"season": seasons.current(),
+            "sounds": [{"id": k, "label": seasons.label_of(k)} for k in seasons.all_ids()]}
 
 
 @app.post("/api/talk/sound")
 def talk_sound(body: TalkSound) -> dict[str, Any]:
-    """Play a built-in sound out of one camera's speaker (across-IPC talk)."""
-    entry = audiogen.SOUNDS.get(body.sound)
-    if entry is None:
+    """Play a sound out of one camera's speaker (across-IPC talk). sound='season'
+    plays a random sound of the current season."""
+    try:
+        chosen, alaw = seasons.render(body.sound)
+    except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown sound {body.sound!r}")
-    alaw = entry[1]()
     if not _TALK_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="talk is busy on another camera")
     try:
@@ -1235,8 +1240,8 @@ def talk_sound(body: TalkSound) -> dict[str, Any]:
         raise HTTPException(status_code=504, detail=f"NVR unreachable: {e}")
     finally:
         _TALK_LOCK.release()
-    return {"ok": True, "channel": body.channel, "sound": body.sound,
-            "seconds": round(len(alaw) / 8000, 1)}
+    return {"ok": True, "channel": body.channel, "sound": chosen,
+            "label": seasons.label_of(chosen), "seconds": round(len(alaw) / 8000, 1)}
 
 
 @app.websocket("/api/talk/ws/{channel}")

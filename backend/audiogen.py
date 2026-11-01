@@ -171,7 +171,76 @@ def evil_laugh_alaw(rate: int = 8000) -> bytes:
 
 # sound name -> builder. Add more here (e.g. a siren) and they appear in the UI.
 # The pumpkin button plays "halloween".
+def jingle_bells_alaw(rate: int = 8000) -> bytes:
+    """First line of the 'Jingle Bells' chorus (public-domain tune) as a music box: each note a
+    sine plus bright partials with a plucked exponential decay, notes overlap
+    so they ring like tines."""
+    C5, D5, E5, F5, G5 = 523.25, 587.33, 659.25, 698.46, 783.99
+    e, q, h = 0.17, 0.34, 0.68          # eighth / quarter / half at ~88 bpm
+    tune = [(E5, q), (E5, q), (E5, h), (E5, q), (E5, q), (E5, h),
+            (E5, q), (G5, q), (C5, q + e), (D5, e), (E5, h + h)]   # "...jingle all the way"
+    total = sum(d for _, d in tune) + 1.2
+    out = [0.0] * int(total * rate)
+    t0 = 0.0
+    for f, d in tune:
+        start = int(t0 * rate)
+        ring = int(1.1 * rate)
+        for i in range(min(ring, len(out) - start)):
+            t = i / rate
+            env = math.exp(-t * 4.5) * min(1.0, t * 400)
+            v = (math.sin(2 * math.pi * f * t) + 0.35 * math.sin(2 * math.pi * 2 * f * t)
+                 + 0.15 * math.sin(2 * math.pi * 3.01 * f * t) * math.exp(-t * 9))
+            out[start + i] += 0.32 * env * v
+        t0 += d
+    return _samples_to_alaw(out)
+
+
+def fireworks_alaw(rate: int = 8000, seed: int = 2027) -> bytes:
+    """Two rockets: a rising whistle, a deep thump-bang, then a crackling
+    shower of tiny pops. Deterministic noise so it sounds the same each time."""
+    import random
+    rnd = random.Random(seed)
+    out = [0.0] * int(5.2 * rate)
+
+    def add(at: float, samples: list[float]) -> None:
+        s0 = int(at * rate)
+        for i, v in enumerate(samples):
+            if s0 + i < len(out):
+                out[s0 + i] += v
+
+    def whistle(dur: float, f0: float, f1: float) -> list[float]:
+        n, ph, res = int(dur * rate), 0.0, []
+        for i in range(n):
+            x = i / n
+            ph += 2 * math.pi * (f0 + (f1 - f0) * x * x) / rate
+            res.append(0.10 * math.sin(ph) * min(1.0, x * 8) * (1 - x * 0.5) + 0.03 * (rnd.random() - 0.5))
+        return res
+
+    def bang(dur: float) -> list[float]:
+        n, lp, res = int(dur * rate), 0.0, []
+        for i in range(n):
+            t = i / rate
+            lp += 0.35 * ((rnd.random() * 2 - 1) - lp)          # one-pole low-pass: boomy noise
+            res.append(0.95 * lp * math.exp(-t * 7) + 0.5 * math.sin(2 * math.pi * 55 * t) * math.exp(-t * 12))
+        return res
+
+    def crackle(dur: float, density: int) -> list[float]:
+        res = [0.0] * int(dur * rate)
+        for _ in range(density):
+            p = rnd.randrange(len(res) - 60)
+            amp = 0.9 * rnd.random() * (1 - 0.7 * p / len(res))
+            for k in range(rnd.randrange(15, 50)):
+                res[p + k] += amp * (rnd.random() * 2 - 1) * math.exp(-k / 10)
+        return res
+
+    add(0.0, whistle(1.0, 700, 2300)); add(1.0, bang(1.2)); add(1.15, crackle(1.6, 140))
+    add(2.4, whistle(0.8, 900, 2700)); add(3.2, bang(1.1)); add(3.3, crackle(1.8, 170))
+    return _samples_to_alaw(out)
+
+
 SOUNDS = {
     "halloween": ("🎃 Evil laugh", evil_laugh_alaw),
     "ghost": ("👻 Ghost wail", halloween_alaw),
+    "jingle_bells": ("🎶 Jingle Bells music box", jingle_bells_alaw),
+    "fireworks": ("🎆 Fireworks", fireworks_alaw),
 }
