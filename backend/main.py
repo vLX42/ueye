@@ -22,7 +22,7 @@ from typing import Any
 
 import subprocess
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse, Response, FileResponse
 from pydantic import BaseModel
 
@@ -33,6 +33,7 @@ import audiogen  # noqa: E402
 import sofia  # noqa: E402
 import auth  # noqa: E402
 import seasons  # noqa: E402
+import accesslog  # noqa: E402
 
 # Face sorting is optional: if the CV stack isn't installed the rest of the API
 # still works and the face endpoints report unavailable.
@@ -49,7 +50,77 @@ except Exception as _face_err:  # pragma: no cover
 
 app = FastAPI(title="uEye", version="0.1.0")
 app.include_router(auth.router)
+app.include_router(accesslog.router)
 CFG = AppConfig.load()
+
+
+def _cam(ch) -> str:
+    try:
+        ch = int(ch)
+    except (TypeError, ValueError):
+        return f"Camera {ch}"
+    return next((c.name for c in CFG.channels if c.id == ch), f"Camera {ch}")
+
+
+def _log_access(request: Request, code: int) -> None:
+    """Access log for actions visible from the path alone (see accesslog.py).
+    Export / talk are logged in their handlers, which know the details."""
+    path, m = request.url.path, request.method
+    if path == "/api/auth/check":
+        if code >= 300:      # an outside request without a valid login
+            accesslog.record(accesslog.client(request), "Blocked (not logged in)",
+                             request.headers.get("x-forwarded-uri", "")[:120], ok=False,
+                             dedupe_s=600, dedupe_key="")
+    elif path == "/api/auth/login" and m == "POST":
+        c = accesslog.client(request)
+        if code == 200:
+            accesslog.record(c, "Logged in")
+        else:
+            why = {429: "too many attempts", 503: "no password set, outside access off"}.get(code, "wrong password")
+            accesslog.record(c, "Login failed", why, ok=False)
+    elif path == "/api/auth/logout" and m == "POST":
+        accesslog.record(accesslog.client(request), "Logged out")
+    elif path == "/api/clip" and code < 400:
+        q = request.query_params
+        start = q.get("start", "")
+        # next-chunk fetches of the same camera collapse into one row
+        accesslog.record(accesslog.client(request), "Playback",
+                         f"{_cam(q.get('channel'))} {start[:16]}", dedupe_s=300,
+                         dedupe_key=f"{q.get('channel')}|{start[:10]}")
+    elif m == "GET" and path.startswith("/api/export/") and path.endswith("/file") and code < 400:
+        job = _exports.get(path.split("/")[3]) or {}
+        accesslog.record(accesslog.client(request), "Downloaded export", job.get("filename", ""), dedupe_s=60)
+    elif m == "POST" and (path.startswith("/api/config/") or path == "/api/motion"):
+        accesslog.record(accesslog.client(request), "Changed settings",
+                         path.removeprefix("/api/config/").removeprefix("/api/"), ok=code < 400)
+    elif m == "POST" and path.startswith("/api/faces/") and code < 400:
+        accesslog.record(accesslog.client(request), "Faces",
+                         "scan started" if path.endswith("/index") else "named a person")
+
+
+class _AccessLogMiddleware:
+    """Plain ASGI pass-through that only peeks at the response status. (FastAPI's
+    @app.middleware("http") wraps streaming bodies, which would get in the way of
+    the clip streams and their stop-on-disconnect.)"""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope["path"].startswith("/api/"):
+            return await self.app(scope, receive, send)
+
+        async def send_wrap(msg):
+            if msg["type"] == "http.response.start":
+                try:
+                    await asyncio.to_thread(_log_access, Request(scope), msg["status"])
+                except Exception as e:  # logging must never break a request
+                    print(f"[accesslog] {e}", flush=True)
+            await send(msg)
+        await self.app(scope, receive, send_wrap)
+
+
+app.add_middleware(_AccessLogMiddleware)
 
 # The NVR allows only a few concurrent playback streams. Cap how many ByTime
 # pulls (clips + thumbnails) we run at once so a wall of lazy-loading thumbnails
@@ -827,7 +898,7 @@ def _prune_exports() -> None:
 
 
 @app.post("/api/export")
-def export_start(req: ExportReq):
+def export_start(req: ExportReq, request: Request):
     start, end = _norm_time(req.start), _norm_time(req.end)
     span = (datetime.strptime(end, _FMT) - datetime.strptime(start, _FMT)).total_seconds()
     if span <= 0:
@@ -842,6 +913,7 @@ def export_start(req: ExportReq):
            "filename": f"{name} {start.replace(':', '.')}.mp4"}
     _exports[jid] = job
     threading.Thread(target=_run_export, args=(job,), daemon=True, name=f"export-{jid}").start()
+    accesslog.record(accesslog.client(request), "Export", f"{name} {start[:16]} to {end[11:16]}")
     return job
 
 
@@ -1249,13 +1321,14 @@ def talk_sounds() -> dict[str, Any]:
 
 
 @app.post("/api/talk/sound")
-def talk_sound(body: TalkSound) -> dict[str, Any]:
+def talk_sound(body: TalkSound, request: Request) -> dict[str, Any]:
     """Play a sound out of one camera's speaker (across-IPC talk). sound='season'
     plays a random sound of the current season."""
     try:
         chosen, alaw = seasons.render(body.sound)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown sound {body.sound!r}")
+    accesslog.record(accesslog.client(request), "Played sound", f"{_cam(body.channel)}: {seasons.label_of(chosen)}")
     if not _TALK_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="talk is busy on another camera")
     try:
@@ -1277,6 +1350,7 @@ async def talk_ws(ws: WebSocket, channel: int) -> None:
     8 kHz as binary frames; we a-law encode each and push it to the camera.
     Holds the talk session for the life of the socket."""
     await ws.accept()
+    accesslog.record(accesslog.client(ws), "Talk", _cam(channel))
     if not _TALK_LOCK.acquire(blocking=False):
         await ws.close(code=1013, reason="talk busy")   # try again later
         return

@@ -8,6 +8,9 @@ const api = (p, opt) => fetch(`/api${p}`, opt).then(async r => {
 });
 
 let CHANNELS = [];
+// access log: tell the server which page was opened (live video bypasses the API)
+const logView = view => fetch('/api/access-log/view', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ view }) }).catch(() => {});
 
 // --- view switching ---------------------------------------------------------
 $$('nav button').forEach(b => b.onclick = () => {
@@ -20,6 +23,7 @@ $$('nav button').forEach(b => b.onclick = () => {
   if (b.dataset.view === 'settings') loadSettingsNav();
   if (b.dataset.view === 'recordings') onRecordingsShown();
   if (b.dataset.view === 'people') onPeopleShown();
+  logView(b.dataset.view);
 });
 // Also drop the streams when the tab/window is hidden, and bring them back on return.
 document.addEventListener('visibilitychange', () => {
@@ -98,6 +102,9 @@ async function loadSettingsNav() {
     const hb = el('button', 'cfg-sec', 'Health');
     hb.onclick = () => selectNav(hb, renderHealth);
     nav.appendChild(hb);
+    const lb = el('button', 'cfg-sec', 'Access log');
+    lb.onclick = () => selectNav(lb, () => renderAccessLog());
+    nav.appendChild(lb);
 
     // --- Cameras: one friendly page per camera ---
     nav.appendChild(el('h4', 'cfg-group', 'Cameras'));
@@ -177,6 +184,40 @@ async function renderHealth() {
   html += `<p class="h-checked">Checked ${fmtWhen(h.checked)} · refreshes every minute</p></div>`;
   box.innerHTML = html;
   healthTimer = setTimeout(() => { if ($('#settings').classList.contains('active')) renderHealth(); }, 60000);
+}
+// --- access log ---------------------------------------------------------------
+const ACCESS = { scope: 'all', rows: [], more: false };
+const fmtStamp = ts => new Date(ts * 1000).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+async function renderAccessLog(append = false) {
+  const box = $('#set-body');
+  if (!append) { ACCESS.rows = []; box.innerHTML = '<p class="empty">Loading…</p>'; }
+  const before = append && ACCESS.rows.length ? `&before=${ACCESS.rows[ACCESS.rows.length - 1].ts}` : '';
+  let r;
+  try { r = await api(`/access-log?scope=${ACCESS.scope}&limit=200${before}`); }
+  catch (e) { box.innerHTML = `<p class="empty">Error: ${e.message}</p>`; return; }
+  if ($('.cfg-sec.active')?.textContent !== 'Access log') return;   // user moved on
+  ACCESS.rows = ACCESS.rows.concat(r.rows);
+  ACCESS.more = r.rows.length === 200;
+  const esc = t => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  const tabs = [['all', 'All'], ['outside', 'Outside'], ['home', 'Home']]
+    .map(([k, l]) => `<button class="pb-q${ACCESS.scope === k ? ' on' : ''}" data-scope="${k}">${l}</button>`).join('');
+  const rows = ACCESS.rows.map(x => `<tr class="${x.ok ? '' : 'al-bad'}">
+      <td class="al-when">${fmtStamp(x.ts)}</td>
+      <td><span class="al-where ${x.home ? 'home' : 'out'}">${x.home ? 'Home' : 'Outside'}</span></td>
+      <td class="al-ip">${esc(x.ip)}</td>
+      <td><b>${esc(x.action)}</b>${x.detail ? `<div class="al-detail">${esc(x.detail)}</div>` : ''}</td>
+      <td class="al-dev">${esc(x.device)}${x.session ? ` <span class="al-sess" title="Login session">#${esc(x.session)}</span>` : ''}</td>
+    </tr>`).join('');
+  box.innerHTML = `<div class="access">
+    <div class="al-head"><span class="pb-qual">${tabs}</span>
+      <span class="al-note">Kept ${r.keep_days} days · repeated actions within a few minutes are shown once</span></div>
+    ${ACCESS.rows.length ? `<div class="al-wrap"><table class="al-table">
+      <thead><tr><th>When</th><th>Where</th><th>IP</th><th>Action</th><th>Device</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : '<p class="empty">Nothing logged yet.</p>'}
+    ${ACCESS.more ? '<button class="pb-btn al-more">Load older</button>' : ''}</div>`;
+  box.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { ACCESS.scope = b.dataset.scope; renderAccessLog(); });
+  const more = box.querySelector('.al-more');
+  if (more) more.onclick = () => renderAccessLog(true);
 }
 function selectNav(btn, fn) {
   $$('.cfg-sec').forEach(x => x.classList.remove('active'));
@@ -916,13 +957,18 @@ function hideHover() { clearTimeout(hoverTimer); $('#tl-hover').classList.add('h
 // clip is starting. Unthrottled, a screenful of cards took every browser
 // connection (6 per host) and the clicked clip queued behind them.
 const THUMBQ = { q: [], active: 0, paused: false, resumeTimer: null, loaded: new Set() };
+// Newest-visible first: the queue only holds cards on (or near) screen, and the
+// most recently scrolled-to card goes next. Before, it was first-come: scrolling
+// to the end of the rail meant waiting for every card scrolled past.
 function pumpThumbs() {
   while (!THUMBQ.paused && THUMBQ.active < 2 && THUMBQ.q.length) {
-    const img = THUMBQ.q.shift();
-    if (!img.isConnected) continue;
+    const img = THUMBQ.q.pop();
+    if (!img.isConnected || img.dataset.state) continue;
     THUMBQ.active++;
-    img.onerror = () => { THUMBQ.active--; pumpThumbs(); };
-    img.onload = () => { THUMBQ.loaded.add(img.src); THUMBQ.active--; pumpThumbs(); };
+    img.dataset.state = 'loading';
+    thumbObserver?.unobserve(img);
+    img.onerror = () => { img.dataset.state = 'failed'; img.removeAttribute('src'); THUMBQ.active--; pumpThumbs(); };
+    img.onload = () => { img.dataset.state = 'done'; THUMBQ.loaded.add(img.src); THUMBQ.active--; pumpThumbs(); };
     img.src = img.dataset.src;
   }
 }
@@ -940,10 +986,12 @@ function renderEvents() {
   if (thumbObserver) thumbObserver.disconnect();
   THUMBQ.q = [];
   thumbObserver = new IntersectionObserver(ents => {
-    for (const en of ents) if (en.isIntersecting) {
-      const img = en.target; THUMBQ.q.push(img); thumbObserver.unobserve(img);
-      pumpThumbs();
+    for (const en of ents) {
+      const img = en.target, i = THUMBQ.q.indexOf(img);
+      if (i >= 0) THUMBQ.q.splice(i, 1);            // scrolled away: forget it
+      if (en.isIntersecting) THUMBQ.q.push(img);    // (re)entered: goes next
     }
+    pumpThumbs();
   }, { root: box, rootMargin: '200px' });
   for (const ev of evs) {
     const card = el('div', 'ev-card');
@@ -1169,6 +1217,7 @@ async function boot() {
     return;
   }
   renderGrid();
+  logView('live');
   // recordings timeline: wire controls and default to today (rendered on show)
   REC.date = todayISO();
   $('#rec-date').value = REC.date;

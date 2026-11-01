@@ -363,16 +363,30 @@ class DVRIPClient:
                 while True:
                     head = self._recv_exact(HEADER_LEN)
                     mid, length = struct.unpack_from("<HI", head, 14)
+                    if mid == 1426 and length == 0:
+                        # An EMPTY data packet is the NVR saying "end of data" (or,
+                        # as the first packet, "nothing for you"). Stop now instead
+                        # of sitting out idle_timeout: that wait made every
+                        # unavailable thumbnail cost ~5 s.
+                        break
                     body = self._recv_exact(length) if length else b""
                     if mid == 1426 and not _is_status(body):
                         yield body
             except (OSError, DVRIPError):
                 pass  # idle timeout = end of stream
-            try:
-                send(1420, "DownloadStop")
-            except OSError:
-                pass
-            self._sock.settimeout(self.timeout)
+            finally:
+                # Always release the NVR's download slot, also when the caller
+                # stops early (thumbnail got its frame, viewer abandoned a clip):
+                # closing the generator raises GeneratorExit at the yield, which
+                # used to skip this and leave the stop to the NVR.
+                try:
+                    send(1420, "DownloadStop")
+                except OSError:
+                    pass
+                try:
+                    self._sock.settimeout(self.timeout)
+                except OSError:
+                    pass
 
     # --- two-way audio (talk / intercom) ------------------------------------
     # BitRate 0 matches what the official XMEye lib (libFunSDK NewMediaControlPTL)

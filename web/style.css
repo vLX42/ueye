@@ -269,3 +269,22 @@ main.mx-auto { padding-bottom: max(.75rem, env(safe-area-inset-bottom)); }
 /* go2rtc's player prints its transport (RTC/MSE/loading) over the video: debug
    noise. Keep .status, which only shows text when a stream errors. */
 video-stream .info .mode { display: none; }
+
+/* access log */
+.al-head { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: .7rem; }
+.al-note { color: var(--muted); font-size: .75rem; }
+.al-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+.al-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+.al-table th { text-align: left; color: var(--muted); font-weight: 600; font-size: .72rem; text-transform: uppercase;
+  letter-spacing: .05em; padding: .5rem .6rem; background: var(--panel); border-bottom: 1px solid var(--line); }
+.al-table td { padding: .45rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+.al-table tr:last-child td { border-bottom: 0; }
+.al-when, .al-ip { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.al-ip, .al-dev, .al-detail { color: var(--muted); }
+.al-detail { font-size: .78rem; overflow-wrap: anywhere; }
+.al-where { font-size: .72rem; padding: .1rem .45rem; border-radius: 999px; white-space: nowrap; }
+.al-where.home { background: rgba(74, 222, 128, .15); color: var(--ok); }
+.al-where.out { background: rgba(251, 191, 36, .15); color: #fbbf24; }
+.al-bad b { color: var(--danger); }
+.al-sess { font-family: ui-monospace, monospace; font-size: .72rem; }
+.al-more { margin-top: .7rem; }
