@@ -17,7 +17,7 @@
        works fully offline. Loaded before style.css so the hand-written component
        styles win on any conflict. -->
   <link rel="stylesheet" href="tailwind.css?v=19" />
-  <link rel="stylesheet" href="style.css?v=23" />
+  <link rel="stylesheet" href="style.css?v=25" />
   <!-- go2rtc web component: <video-stream> handles MSE/WebRTC fallback -->
   <script type="module" src="/go2rtc/video-stream.js"></script>
 </head>
@@ -79,9 +79,18 @@
               <option value="4">4×</option>
             </select>
           </label>
-          <a id="pb-dl" class="pb-btn" title="Download the original hour (4K HEVC)" download>⭳</a>
+          <button id="pb-export" class="pb-btn" title="Export a clip as MP4">↓ Export</button>
           <button id="pb-full" class="pb-btn" title="Fullscreen">⛶</button>
           <button id="pb-close" class="pb-btn" title="Close player">✕</button>
+        </div>
+        <div id="rec-export" class="rec-export hidden">
+          <span class="ex-label">Export</span>
+          <input type="time" id="ex-from" step="1" aria-label="From" />
+          <span>–</span>
+          <input type="time" id="ex-to" step="1" aria-label="To" />
+          <button id="ex-event" class="pb-btn" title="Set the range to the motion event at the playhead">This event</button>
+          <button id="ex-go" class="pb-btn ex-go">Export MP4</button>
+          <span id="ex-status" class="ex-status"></span>
         </div>
       </div>
 
@@ -126,6 +135,6 @@
     </section>
   </main>
 
-  <script src="app.js?v=23"></script>
+  <script src="app.js?v=25"></script>
 </body>
 </html>

@@ -93,6 +93,12 @@ async function loadSettingsNav() {
     if (!SECTIONS) SECTIONS = await api('/config-sections');
     nav.innerHTML = '';
 
+    // --- Status: health overview (opened by default) ---
+    nav.appendChild(el('h4', 'cfg-group', 'Status'));
+    const hb = el('button', 'cfg-sec', 'Health');
+    hb.onclick = () => selectNav(hb, renderHealth);
+    nav.appendChild(hb);
+
     // --- Cameras: one friendly page per camera ---
     nav.appendChild(el('h4', 'cfg-group', 'Cameras'));
     CHANNELS.forEach(c => {
@@ -129,7 +135,48 @@ async function loadSettingsNav() {
       }
     }
     settingsNavLoaded = true;
+    if (!$('.cfg-sec.active')) hb.click();
   } catch (e) { nav.innerHTML = `<p class="empty">Error: ${e.message}</p>`; }
+}
+
+// --- health page ---------------------------------------------------------------
+let healthTimer = null;
+const fmtBytes = b => b >= 1e12 ? `${(b / 1e12).toFixed(1)} TB` : b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
+const fmtWhen = ts => { const d = new Date(ts.replace(' ', 'T')); return d.toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); };
+async function renderHealth() {
+  clearTimeout(healthTimer);
+  const box = $('#set-body');
+  if (!box.querySelector('.health')) box.innerHTML = '<p class="empty">Checking the NVR…</p>';
+  let h;
+  try { h = await api('/health/status'); } catch (e) { box.innerHTML = `<p class="empty">Error: ${e.message}</p>`; return; }
+  if (!$('.cfg-sec.active') || $('.cfg-sec.active').textContent !== 'Health') return;   // user moved on
+  const row = (state, title, detail) => `<div class="h-row"><span class="h-dot ${state}"></span><div><b>${title}</b><div class="h-detail">${detail}</div></div></div>`;
+  const n = h.nvr;
+  let html = '<div class="health">';
+  if (!n) html += `<section><h3>NVR</h3>${row('bad', 'NVR unreachable', h.nvr_error || '')}</section>`;
+  else {
+    html += '<section><h3>Cameras</h3>' + n.cameras.map(c => row(
+      !c.online ? 'bad' : (c.covered || !c.recording) ? 'warn' : 'ok', c.name,
+      !c.online ? 'Offline: no video from this camera'
+        : [c.recording ? 'Recording' : 'NOT recording', `${(c.bitrate_kbps / 1000).toFixed(1)} Mbit/s now`, c.covered ? 'lens covered?' : ''].filter(Boolean).join(' · '))).join('') + '</section>';
+    html += '<section><h3>Storage</h3>' + n.disks.map(d => row(d.ok ? 'ok' : 'bad',
+      `${fmtBytes(d.total_mb * 1048576)} disk ${d.ok ? 'OK' : 'ERROR'}`,
+      d.free_mb ? `${fmtBytes(d.free_mb * 1048576)} free` : 'Full, overwriting the oldest footage (normal)')).join('');
+    if (n.oldest_footage) html += row('ok', `Footage back to ${fmtWhen(n.oldest_footage)}`,
+      `About ${Math.floor(n.retention_days)} days kept. Export anything you want to keep before it gets older than that.`);
+    html += '</section>';
+    const days = Math.floor(n.uptime_min / 1440);
+    html += `<section><h3>NVR</h3>${row('ok', n.model || 'NVR', `Firmware ${n.firmware} · up ${days} days`)}`;
+  }
+  const c = h.clock;
+  html += row(c.error ? 'bad' : c.drift_s == null ? 'warn' : 'ok', 'Clock',
+    c.error ? `Sync failed: ${c.error}` : c.drift_s == null ? 'Not checked yet'
+      : `In sync (${c.drift_s >= 0 ? '+' : ''}${c.drift_s} s), checked ${fmtWhen(c.last_check)}${c.last_set ? `, last corrected ${fmtWhen(c.last_set)}` : ''}`);
+  html += (n ? '</section>' : '');
+  html += `<section><h3>uEye on the NAS</h3>${row('ok', 'Disk use', `Playback cache ${fmtBytes(h.nas.cache_bytes)} · exports ${fmtBytes(h.nas.exports_bytes)}`)}</section>`;
+  html += `<p class="h-checked">Checked ${fmtWhen(h.checked)} · refreshes every minute</p></div>`;
+  box.innerHTML = html;
+  healthTimer = setTimeout(() => { if ($('#settings').classList.contains('active')) renderHealth(); }, 60000);
 }
 function selectNav(btn, fn) {
   $$('.cfg-sec').forEach(x => x.classList.remove('active'));
@@ -901,19 +948,52 @@ function seekTo(ch, sec) {
   v.playbackRate = Number($('#pb-rate').value);
   v.play().catch(() => {});
   $('#pb-play').textContent = '❚❚';
-  updateDownloadLink(ch, sec);
   positionPlayhead();
 }
 function nextFootage(ch, sec) {
   const segs = (REC.seg[ch] || []).filter(s => s.beginSec >= sec).sort((a, b) => a.beginSec - b.beginSec);
   return segs.length ? segs[0].beginSec : null;
 }
-function updateDownloadLink(ch, sec) {
-  const s = segAt(ch, sec), a = $('#pb-dl');
-  if (!s) { a.style.visibility = 'hidden'; return; }
-  a.style.visibility = '';
-  a.href = `/api/playback?file=${encodeURIComponent(s.fileName)}&begin=${encodeURIComponent(s.begin)}`
-    + `&end=${encodeURIComponent(s.end)}&size_kb=${s.size_kb}&transcode=0`;
+// --- export a range as MP4 (original 4K, no re-encode; runs as a server job) ---
+const EXPORT_MAX = 30 * 60;
+const secOfClock = v => { const [h, m, s2] = v.split(':').map(Number); return h * 3600 + m * 60 + (s2 || 0); };
+function exportRangeAt(ch, cur) {
+  const ev = REC.events.find(e => e.channel === ch && e.beginSec <= cur && cur < e.endSec);
+  const [a, b] = ev ? [ev.beginSec - 5, ev.endSec + 5] : [cur - 30, cur + 30];
+  return [Math.max(0, a), Math.min(DAY - 1, b), !!ev];
+}
+function openExport() {
+  const box = $('#rec-export');
+  if (!box.classList.contains('hidden')) { box.classList.add('hidden'); return; }
+  const cur = REC.play.chunkStart + ($('#rec-video').currentTime || 0);
+  const [a, b] = exportRangeAt(REC.play.ch, cur);
+  $('#ex-from').value = fmtClock(a); $('#ex-to').value = fmtClock(b);
+  $('#ex-status').textContent = '';
+  box.classList.remove('hidden');
+}
+async function runExport() {
+  const ch = REC.play.ch, st = $('#ex-status'), go = $('#ex-go');
+  const a = secOfClock($('#ex-from').value), b = secOfClock($('#ex-to').value);
+  if (!(b > a)) { st.textContent = 'End must be after start'; return; }
+  if (b - a > EXPORT_MAX) { st.textContent = 'Max 30 minutes per export'; return; }
+  go.disabled = true; st.textContent = 'Starting…';
+  try {
+    let job = await api('/export', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel: ch, start: `${REC.date} ${fmtClock(a)}`, end: `${REC.date} ${fmtClock(b)}` }) });
+    while (job.state === 'queued' || job.state === 'running') {
+      st.textContent = job.state === 'queued' ? 'Waiting for another export…' : `Exporting… ${Math.round(job.progress * 100)}%`;
+      await new Promise(r => setTimeout(r, 2000));
+      job = await api(`/export/${job.id}`);
+    }
+    if (job.state !== 'done') throw new Error(job.error || 'export failed');
+    const url = `/api/export/${job.id}/file`;
+    st.innerHTML = '';
+    const link = Object.assign(document.createElement('a'), { href: url, download: job.filename,
+      textContent: `Download ${job.filename} (${size(job.size / 1024)})` });
+    st.append(link);
+    link.click();
+  } catch (e) { st.textContent = 'Export failed: ' + e.message; }
+  go.disabled = false;
 }
 function spinner(on) { $('#rec-spinner').classList.toggle('hidden', !on); }
 function positionPlayhead(curSec) {
@@ -980,6 +1060,13 @@ function bindPlayer() {
     $('#pb-' + q).classList.toggle('on', REC.quality === q);
     $('#pb-' + q).onclick = () => setQuality(q);
   }
+  $('#pb-export').onclick = openExport;
+  $('#ex-go').onclick = runExport;
+  $('#ex-event').onclick = () => {
+    const [a, b, ev] = exportRangeAt(REC.play.ch, REC.play.chunkStart + ($('#rec-video').currentTime || 0));
+    $('#ex-from').value = fmtClock(a); $('#ex-to').value = fmtClock(b);
+    $('#ex-status').textContent = ev ? '' : 'No motion event at the playhead, using ±30 s';
+  };
   $('#pb-full').onclick = () => {
     const b = $('.rec-video-box');
     if (document.fullscreenElement || document.webkitFullscreenElement)
@@ -990,7 +1077,7 @@ function bindPlayer() {
   };
   $('#pb-close').onclick = () => {
     v.pause(); v.removeAttribute('src'); v.load();
-    $('#rec-player').classList.add('hidden'); REC.play.ch = null; positionPlayhead();
+    $('#rec-player').classList.add('hidden'); $('#rec-export').classList.add('hidden'); REC.play.ch = null; positionPlayhead();
   };
 }
 function jump(delta) {

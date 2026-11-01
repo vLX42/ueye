@@ -240,3 +240,25 @@ header.sticky {
   padding-right: max(.75rem, env(safe-area-inset-right));
 }
 main.mx-auto { padding-bottom: max(.75rem, env(safe-area-inset-bottom)); }
+
+/* export bar under the player controls */
+.rec-export { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; padding: .5rem .7rem;
+  background: var(--panel); border-top: 1px solid var(--line); font-size: .85rem; }
+.rec-export.hidden { display: none; }
+.rec-export input[type=time] { background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 7px; padding: .35rem .5rem; font: inherit; font-size: 16px; color-scheme: dark; }
+.ex-label { color: var(--muted); }
+.ex-go { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.ex-go:disabled { opacity: .6; cursor: default; }
+.ex-status { color: var(--muted); }
+.ex-status a { color: var(--accent); }
+
+/* health page */
+.health section { margin-bottom: 1.2rem; }
+.health h3 { margin: 0 0 .5rem; font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.h-row { display: flex; gap: .7rem; align-items: flex-start; padding: .6rem .75rem; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px; margin-bottom: .4rem; }
+.h-dot { width: .7rem; height: .7rem; border-radius: 50%; margin-top: .3rem; flex: none; background: var(--off); }
+.h-dot.ok { background: var(--ok); } .h-dot.warn { background: #fbbf24; } .h-dot.bad { background: var(--danger); }
+.h-detail { color: var(--muted); font-size: .85rem; margin-top: .1rem; overflow-wrap: anywhere; }
+.h-checked { color: var(--muted); font-size: .75rem; }

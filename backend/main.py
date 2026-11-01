@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import AppConfig  # noqa: E402
-from dvrip import DVRIPClient, DVRIPError  # noqa: E402
+from dvrip import DVRIPClient, DVRIPError, SYSINFO_REQ  # noqa: E402
 import audiogen  # noqa: E402
 import sofia  # noqa: E402
 import auth  # noqa: E402
@@ -323,6 +323,81 @@ def health() -> dict[str, Any]:
             "channels": [{"id": c.id, "name": c.name} for c in CFG.channels]}
 
 
+# --- health: NVR disk, retention, cameras, clock + NAS-side usage -----------
+# Metadata only (4 small DVRIP queries, cached), nothing is decoded.
+_health_cache: tuple[float, dict[str, Any]] | None = None
+_HEALTH_TTL = 60.0
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    for f in path.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def _nvr_health() -> dict[str, Any]:
+    with nvr() as c:
+        q = lambda n: c._cmd(SYSINFO_REQ, {"Name": n, "SessionID": c._sid_str()}).get(n)
+        info, storage, work, chstat = q("SystemInfo") or {}, q("StorageInfo") or [], q("WorkState") or {}, q("ChannelStatus") or {}
+    disks = []
+    for d in storage:
+        parts = [p for p in d.get("Partition", []) if int(str(p.get("TotalSpace", "0")), 16)]
+        if not parts:
+            continue
+        total = sum(int(str(p["TotalSpace"]), 16) for p in parts)      # MB
+        free = sum(int(str(p.get("RemainSpace", "0")), 16) for p in parts)
+        starts = [t for p in parts for t in (p.get("NewStartTime"), p.get("OldStartTime")) if t and not t.startswith("0000")]
+        ends = [t for p in parts for t in (p.get("NewEndTime"), p.get("OldEndTime")) if t and not t.startswith("0000")]
+        disks.append({"total_mb": total, "free_mb": free,
+                      "ok": all(int(p.get("Status", 0)) == 0 for p in parts),
+                      "oldest": min(starts) if starts else None, "newest": max(ends) if ends else None})
+    link = int(str(chstat.get("ChnLinkStatus", "0")), 16)
+    loss = int((work.get("AlarmState") or {}).get("VideoLoss", 0))
+    blind = int((work.get("AlarmState") or {}).get("VideoBlind", 0))
+    states = work.get("ChannelState") or []
+    cams = []
+    for ch in CFG.channels:
+        st = states[ch.id] if ch.id < len(states) else {}
+        cams.append({"id": ch.id, "name": ch.name,
+                     "online": bool(link >> ch.id & 1) and not (loss >> ch.id & 1),
+                     "covered": bool(blind >> ch.id & 1),
+                     "recording": bool(st.get("Record")), "bitrate_kbps": st.get("Bitrate", 0)})
+    oldest = min((d["oldest"] for d in disks if d["oldest"]), default=None)
+    return {
+        "model": info.get("HardWare"), "firmware": info.get("SoftWareVersion"),
+        "uptime_min": int(str(info.get("DeviceRunTime", "0")), 16),
+        "disks": disks, "oldest_footage": oldest,
+        "retention_days": round((datetime.now() - datetime.strptime(oldest, _FMT)).total_seconds() / 86400, 1) if oldest else None,
+        "cameras": cams,
+    }
+
+
+@app.get("/api/health/status")
+def health_status():
+    global _health_cache
+    now = time.time()
+    if _health_cache and now - _health_cache[0] < _HEALTH_TTL:
+        data = dict(_health_cache[1])
+    else:
+        try:
+            data = {"nvr": _nvr_health(), "nvr_error": None}
+        except HTTPException as e:
+            data = {"nvr": None, "nvr_error": e.detail}
+        _health_cache = (now, data)
+        data = dict(data)
+    data["clock"] = _time_state
+    data["nas"] = {"cache_bytes": _dir_size(CACHE_DIR) - _dir_size(EXPORT_DIR),
+                   "exports_bytes": _dir_size(EXPORT_DIR),
+                   "exports": [{k: j[k] for k in ("filename", "state", "size")} for j in _exports.values()]}
+    data["checked"] = datetime.fromtimestamp(_health_cache[0]).strftime(_FMT)
+    return data
+
+
 @app.get("/api/system")
 def system() -> dict[str, Any]:
     with nvr() as c:
@@ -613,6 +688,150 @@ def clip(channel: int, start: str, duration: int = 90,
                        stop_at=datetime.strptime(end, _FMT), copy=copy,
                        length=(datetime.strptime(end, _FMT) - datetime.strptime(start, _FMT)).total_seconds())
     return StreamingResponse(gen(), media_type="video/mp4")
+
+
+# --- export: a time range of one camera as a downloadable MP4 ----------------
+# Original stream, no re-encode (cheap on the NAS CPU): walk every NVR file that
+# overlaps [start, end), cut on keyframes by the I-frame clock, remux to MP4.
+# Runs as a background job because the NVR only streams recorded data at ~1 MB/s.
+EXPORT_MAX = 30 * 60          # seconds per export
+EXPORT_DIR = CACHE_DIR / "exports"
+EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+for _f in EXPORT_DIR.iterdir():   # jobs live in memory; files from before a restart are orphans
+    _f.unlink(missing_ok=True)
+EXPORT_KEEP = 6 * 3600        # finished files are deleted after this
+_exports: dict[str, dict[str, Any]] = {}
+_export_lock = threading.Lock()   # one export at a time; the rest queue
+
+
+class ExportReq(BaseModel):
+    channel: int
+    start: str
+    end: str
+
+
+def _segments(channel: int, start: str, end: str) -> list[dict[str, Any]]:
+    d0 = datetime.strptime(start, _FMT).date() - timedelta(days=1)  # past-midnight files
+    d1 = datetime.strptime(end, _FMT).date()
+    seen, out = set(), []
+    d = d0
+    while d <= d1:
+        for r in _files_for(channel, d.isoformat()):
+            if r["begin"] < end and r["end"] > start and r["fileName"] not in seen:
+                seen.add(r["fileName"]); out.append(r)
+        d += timedelta(days=1)
+    return sorted(out, key=lambda r: r["begin"])
+
+
+def _run_export(job: dict[str, Any]) -> None:
+    ch, start, end = job["channel"], job["start"], job["end"]
+    t0, t1 = datetime.strptime(start, _FMT), datetime.strptime(end, _FMT)
+    total = (t1 - t0).total_seconds()
+    es = EXPORT_DIR / f"{job['id']}.hevc"
+    out = EXPORT_DIR / f"{job['id']}.mp4"
+    with _export_lock:
+        job["state"] = "running"
+        _PLAYBACK_SEM.acquire()
+        client = None
+        try:
+            segs = _segments(ch, start, end)
+            if not segs:
+                raise RuntimeError("no footage in that range")
+            codec = None
+            with open(es, "wb") as f:
+                client = DVRIPClient(host=CFG.host, port=CFG.port,
+                                     username=CFG.username, password=CFG.password)
+                client.connect()
+                cursor = start   # files can overlap (e.g. after a clock correction): take each moment once
+                for rec in segs:
+                    s, e = max(cursor, rec["begin"]), min(end, rec["end"])
+                    if s >= e:
+                        continue
+                    cursor = e
+                    dl_start, _ = _padded(rec, s)
+                    nvr_end = min((datetime.strptime(e, _FMT) + timedelta(seconds=PAD)).strftime(_FMT), rec["end"])
+                    demux = sofia.StreamDemux(from_keyframe=True,
+                                              start_at=datetime.strptime(s, _FMT),
+                                              stop_at=datetime.strptime(e, _FMT))
+                    dl = client.stream_recording(rec["fileName"], dl_start, nvr_end, idle_timeout=CLIP_IDLE)
+                    try:
+                        for body in dl:
+                            a = demux.feed(body)
+                            if a:
+                                codec = codec or sofia.detect_codec(a)
+                                f.write(a)
+                            t = sofia.last_iframe_time(body)
+                            if t:
+                                job["progress"] = max(job["progress"], min(0.99, (t - t0).total_seconds() / total))
+                            if demux.done:
+                                break
+                        if not demux.done:
+                            f.write(demux.flush())
+                    finally:
+                        dl.close()
+            if not codec or es.stat().st_size < MIN_MP4:
+                raise RuntimeError("no video in that range")
+            tag = ["-tag:v", "hvc1"] if codec == "hevc" else []
+            r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-fflags", "+genpts",
+                                "-f", "hevc" if codec == "hevc" else "h264", "-i", str(es),
+                                "-c:v", "copy", *tag, "-movflags", "+faststart", str(out)],
+                               capture_output=True, timeout=600)
+            if r.returncode != 0 or not out.exists():
+                raise RuntimeError(f"ffmpeg failed: {r.stderr.decode(errors='replace')[-300:]}")
+            job.update(state="done", progress=1.0, size=out.stat().st_size, finished=time.time())
+        except Exception as e:
+            job.update(state="error", error=str(e), finished=time.time())
+            out.unlink(missing_ok=True)
+        finally:
+            es.unlink(missing_ok=True)
+            if client is not None:
+                try: client.close()
+                except Exception: pass
+            _PLAYBACK_SEM.release()
+
+
+def _prune_exports() -> None:
+    now = time.time()
+    for jid, j in list(_exports.items()):
+        if j.get("finished") and now - j["finished"] > EXPORT_KEEP:
+            (EXPORT_DIR / f"{jid}.mp4").unlink(missing_ok=True)
+            _exports.pop(jid, None)
+
+
+@app.post("/api/export")
+def export_start(req: ExportReq):
+    start, end = _norm_time(req.start), _norm_time(req.end)
+    span = (datetime.strptime(end, _FMT) - datetime.strptime(start, _FMT)).total_seconds()
+    if span <= 0:
+        raise HTTPException(status_code=400, detail="end must be after start")
+    if span > EXPORT_MAX:
+        raise HTTPException(status_code=400, detail=f"max {EXPORT_MAX // 60} minutes per export")
+    _prune_exports()
+    jid = hashlib.sha1(f"{req.channel}|{start}|{end}|{time.time()}".encode()).hexdigest()[:12]
+    name = next((c.name for c in CFG.channels if c.id == req.channel), f"Camera {req.channel}")
+    job = {"id": jid, "channel": req.channel, "start": start, "end": end, "state": "queued",
+           "progress": 0.0, "error": None, "size": 0,
+           "filename": f"{name} {start.replace(':', '.')}.mp4"}
+    _exports[jid] = job
+    threading.Thread(target=_run_export, args=(job,), daemon=True, name=f"export-{jid}").start()
+    return job
+
+
+@app.get("/api/export/{jid}")
+def export_status(jid: str):
+    job = _exports.get(jid)
+    if not job:
+        raise HTTPException(status_code=404, detail="unknown export")
+    return job
+
+
+@app.get("/api/export/{jid}/file")
+def export_file(jid: str):
+    job = _exports.get(jid)
+    path = EXPORT_DIR / f"{jid}.mp4"
+    if not job or job["state"] != "done" or not path.exists():
+        raise HTTPException(status_code=404, detail="export not ready")
+    return FileResponse(path, media_type="video/mp4", filename=job["filename"])
 
 
 @app.get("/api/thumb")
