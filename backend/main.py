@@ -55,6 +55,10 @@ CFG = AppConfig.load()
 # pulls (clips + thumbnails) we run at once so a wall of lazy-loading thumbnails
 # can't starve the device or step on live view.
 _PLAYBACK_SEM = threading.Semaphore(2)
+# Background pulls (thumbnails, face-scan frames, exports) may only ever hold ONE
+# of those two slots, so a playback clip always has a slot free. Without this a
+# wall of event-rail thumbnails made clicking an event take ~14s to start.
+_BG_GATE = threading.Semaphore(1)
 
 # Transcoded chunks and thumbnails are deterministic for a given (channel, time,
 # params), so cache them on disk: re-seeks, rewatches and timeline scrubbing hit
@@ -182,11 +186,14 @@ def _ffmpeg_pipe(dl, demux, first: bytes, codec: str, scale: int, preset: str,
     # writing to ffmpeg must never stall the socket: drain the download in its own
     # thread into an unbounded queue (a 20s chunk is ~10 MB) and feed from there.
     q: queue.Queue = queue.Queue()
+    stop = threading.Event()   # set when the browser gave up on this chunk
 
     def pull():
         tail = b""
         try:
             for body in dl:
+                if stop.is_set():
+                    break
                 q.put(body)
                 if stop_at:
                     t = sofia.last_iframe_time(tail + body)
@@ -235,7 +242,8 @@ def _ffmpeg_pipe(dl, demux, first: bytes, codec: str, scale: int, preset: str,
             proc.wait()
             f.close()
             # A header-only MP4 (~800 B) means no frame made it; don't cache that.
-            if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > MIN_MP4:
+            if (proc.returncode == 0 and not stop.is_set()
+                    and tmp.exists() and tmp.stat().st_size > MIN_MP4):
                 tmp.replace(cache)
             else:
                 tmp.unlink(missing_ok=True)
@@ -253,10 +261,23 @@ def _ffmpeg_pipe(dl, demux, first: bytes, codec: str, scale: int, preset: str,
     threading.Thread(target=feed, daemon=True).start()
     threading.Thread(target=drain, daemon=True).start()
 
-    def gen():
-        while (b := out.get()) is not None:
-            yield b
-    return gen
+    async def agen():
+        # Async on purpose: Starlette cancels an async body when the client
+        # disconnects (seek, next event, closed player), which lands in the
+        # finally below and stops the NVR pull instead of finishing a chunk
+        # nobody watches while it blocks a playback slot.
+        done = False
+        try:
+            while True:
+                b = await asyncio.to_thread(out.get)
+                if b is None:
+                    done = True
+                    return
+                yield b
+        finally:
+            if not done:
+                stop.set()
+    return agen
 
 
 @contextmanager
@@ -730,7 +751,7 @@ def _run_export(job: dict[str, Any]) -> None:
     total = (t1 - t0).total_seconds()
     es = EXPORT_DIR / f"{job['id']}.hevc"
     out = EXPORT_DIR / f"{job['id']}.mp4"
-    with _export_lock:
+    with _export_lock, _BG_GATE:
         job["state"] = "running"
         _PLAYBACK_SEM.acquire()
         client = None
@@ -853,7 +874,7 @@ def thumb(channel: int, time: str, scale: int = 320) -> Response:
     if not rec:
         raise HTTPException(status_code=404, detail="no footage at that time")
     end = min((datetime.strptime(time, _FMT) + timedelta(seconds=THUMB_WINDOW)).strftime(_FMT), rec["end"])
-    with _PLAYBACK_SEM:
+    with _BG_GATE, _PLAYBACK_SEM:
         if cache.exists() and cache.stat().st_size > 0:
             return FileResponse(cache, media_type="image/jpeg")
         try:
@@ -910,7 +931,7 @@ def _frames_bgr(channel: int, ts: str, secs: int = 15, cap: int = 12) -> list:
         return []
     dl_start, trim = _padded(rec, ts)
     end = min((datetime.strptime(ts, _FMT) + timedelta(seconds=secs)).strftime(_FMT), rec["end"])
-    with _PLAYBACK_SEM:
+    with _BG_GATE, _PLAYBACK_SEM:
         with nvr() as c:
             raw = c.download_recording(rec["fileName"], dl_start, end, expected_bytes=None, idle_timeout=1.2)
     es = sofia.to_annexb(raw) if raw else b""
