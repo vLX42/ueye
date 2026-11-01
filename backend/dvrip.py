@@ -228,6 +228,12 @@ class DVRIPClient:
         return self._cmd(TIME_SET, {"Name": "OPTimeSetting", "SessionID": self._sid_str(),
                                     "OPTimeSetting": local})
 
+    def reboot(self) -> dict[str, Any]:
+        """Restart the device (OPMachine Reboot, same msg id as OPTimeSetting).
+        Recording pauses for about a minute; it also frees stuck playback slots."""
+        return self._cmd(TIME_SET, {"Name": "OPMachine", "SessionID": self._sid_str(),
+                                    "OPMachine": {"Action": "Reboot"}})
+
     def channel_count(self) -> int:
         info = self.system_info().get("SystemInfo", {})
         return int(info.get("VideoInChannel", 1) or 1)

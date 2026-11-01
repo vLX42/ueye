@@ -288,3 +288,6 @@ video-stream .info .mode { display: none; }
 .al-bad b { color: var(--danger); }
 .al-sess { font-family: ui-monospace, monospace; font-size: .72rem; }
 .al-more { margin-top: .7rem; }
+.h-reboot { display: flex; gap: .8rem; align-items: center; justify-content: space-between; flex-wrap: wrap; width: 100%; }
+.h-reboot-btn.armed { background: var(--danger); color: #fff; }
+.h-err { color: var(--danger); }

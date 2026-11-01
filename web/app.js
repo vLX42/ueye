@@ -181,8 +181,25 @@ async function renderHealth() {
       : `In sync (${c.drift_s >= 0 ? '+' : ''}${c.drift_s} s), checked ${fmtWhen(c.last_check)}${c.last_set ? `, last corrected ${fmtWhen(c.last_set)}` : ''}`);
   html += (n ? '</section>' : '');
   html += `<section><h3>uEye on the NAS</h3>${row('ok', 'Disk use', `Playback cache ${fmtBytes(h.nas.cache_bytes)} · exports ${fmtBytes(h.nas.exports_bytes)}`)}</section>`;
+  html += `<section><h3>Maintenance</h3><div class="h-row"><div class="h-reboot">
+    <div><b>Reboot NVR</b><div class="h-detail">Use it when recordings won't play or thumbnails stay black. Recording pauses for about a minute.</div></div>
+    <button class="pb-btn h-reboot-btn">Reboot NVR</button></div></div></section>`;
   html += `<p class="h-checked">Checked ${fmtWhen(h.checked)} · refreshes every minute</p></div>`;
   box.innerHTML = html;
+  const rb = box.querySelector('.h-reboot-btn');
+  rb.onclick = async () => {
+    if (!rb.classList.contains('armed')) {          // two-step confirm, no browser dialog
+      rb.classList.add('armed'); rb.textContent = 'Yes, reboot now';
+      setTimeout(() => { if (rb.isConnected && rb.classList.contains('armed') && !rb.disabled) { rb.classList.remove('armed'); rb.textContent = 'Reboot NVR'; } }, 5000);
+      return;
+    }
+    rb.disabled = true; rb.textContent = 'Rebooting…';
+    clearTimeout(healthTimer);
+    try { await api('/nvr/reboot', { method: 'POST' }); }
+    catch (e) { rb.disabled = false; rb.classList.remove('armed'); rb.textContent = 'Reboot NVR'; alertBox(rb, e.message); return; }
+    rb.textContent = 'Rebooting… back in about a minute';
+    healthTimer = setTimeout(() => { if ($('#settings').classList.contains('active')) renderHealth(); }, 75000);
+  };
   healthTimer = setTimeout(() => { if ($('#settings').classList.contains('active')) renderHealth(); }, 60000);
 }
 // --- access log ---------------------------------------------------------------
@@ -218,6 +235,9 @@ async function renderAccessLog(append = false) {
   box.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { ACCESS.scope = b.dataset.scope; renderAccessLog(); });
   const more = box.querySelector('.al-more');
   if (more) more.onclick = () => renderAccessLog(true);
+}
+function alertBox(anchor, msg) {
+  const p = el('div', 'h-detail h-err', msg); anchor.closest('.h-row').appendChild(p);
 }
 function selectNav(btn, fn) {
   $$('.cfg-sec').forEach(x => x.classList.remove('active'));

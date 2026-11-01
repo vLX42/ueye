@@ -407,6 +407,21 @@ def _time_sync_loop() -> None:
 threading.Thread(target=_time_sync_loop, daemon=True, name="nvr-time-sync").start()
 
 
+@app.post("/api/nvr/reboot")
+def nvr_reboot(request: Request):
+    """Reboot the NVR from Settings > Health. Fixes the NVR when it stops
+    serving playback (it answers every request with an empty stream)."""
+    with nvr() as c:
+        resp = c.reboot()
+    ok = str(resp.get("Ret")) == "100"
+    accesslog.record(accesslog.client(request), "Rebooted NVR", "" if ok else f"failed: {resp.get('Ret')}", ok=ok)
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"NVR refused the reboot (Ret {resp.get('Ret')})")
+    global _health_cache
+    _health_cache = None      # next health check shows the NVR coming back
+    return {"ok": True}
+
+
 @app.get("/api/nvr-time")
 def nvr_time():
     return _time_state
