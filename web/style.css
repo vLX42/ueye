@@ -262,3 +262,7 @@ main.mx-auto { padding-bottom: max(.75rem, env(safe-area-inset-bottom)); }
 .h-dot.ok { background: var(--ok); } .h-dot.warn { background: #fbbf24; } .h-dot.bad { background: var(--danger); }
 .h-detail { color: var(--muted); font-size: .85rem; margin-top: .1rem; overflow-wrap: anywhere; }
 .h-checked { color: var(--muted); font-size: .75rem; }
+
+/* go2rtc's player prints its transport (RTC/MSE/loading) over the video: debug
+   noise. Keep .status, which only shows text when a stream errors. */
+video-stream .info .mode { display: none; }
