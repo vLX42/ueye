@@ -180,7 +180,7 @@ async function renderHealth() {
     c.error ? `Sync failed: ${c.error}` : c.drift_s == null ? 'Not checked yet'
       : `In sync (${c.drift_s >= 0 ? '+' : ''}${c.drift_s} s), checked ${fmtWhen(c.last_check)}${c.last_set ? `, last corrected ${fmtWhen(c.last_set)}` : ''}`);
   html += (n ? '</section>' : '');
-  html += `<section><h3>uEye on the NAS</h3>${row('ok', 'Disk use', `Playback cache ${fmtBytes(h.nas.cache_bytes)} · exports ${fmtBytes(h.nas.exports_bytes)}`)}</section>`;
+  html += `<section><h3>uEye on the NAS</h3>${row('ok', 'Disk use', `Alert thumbnails ${fmtBytes(h.nas.thumbs_bytes || 0)} (kept as long as the NVR keeps the video) · playback cache ${fmtBytes(h.nas.cache_bytes)} · exports ${fmtBytes(h.nas.exports_bytes)}`)}</section>`;
   html += `<section><h3>Maintenance</h3><div class="h-row"><div class="h-reboot">
     <div><b>Reboot NVR</b><div class="h-detail">Use it when recordings won't play or thumbnails stay black. Recording pauses for about a minute.</div></div>
     <button class="pb-btn h-reboot-btn">Reboot NVR</button></div></div></section>`;

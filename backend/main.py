@@ -149,7 +149,12 @@ _FMT = "%Y-%m-%d %H:%M:%S"
 
 def _cache_path(kind: str, key: str, ext: str) -> Path:
     h = hashlib.sha1(key.encode()).hexdigest()[:20]
-    return (THUMB_DIR if kind == "thumb" else CACHE_DIR) / f"{kind}_{h}.{ext}"
+    if kind == "thumb":
+        # day of the moment in the name, so thumbs can be dropped exactly when
+        # the NVR overwrites that day's footage (key = "ch|YYYY-MM-DD HH:MM:SS|scale")
+        day = key.split("|")[1][:10].replace("-", "")
+        return THUMB_DIR / f"thumb_{day}_{h}.{ext}"
+    return CACHE_DIR / f"{kind}_{h}.{ext}"
 
 
 def _norm_time(t: str) -> str:
@@ -511,6 +516,7 @@ def health_status():
     data["clock"] = _time_state
     data["nas"] = {"cache_bytes": _dir_size(CACHE_DIR) - _dir_size(EXPORT_DIR),
                    "exports_bytes": _dir_size(EXPORT_DIR),
+                   "thumbs_bytes": _dir_size(THUMB_DIR) if THUMB_DIR != CACHE_DIR else 0,
                    "exports": [{k: j[k] for k in ("filename", "state", "size")} for j in _exports.values()]}
     data["checked"] = datetime.fromtimestamp(_health_cache[0]).strftime(_FMT)
     return data
@@ -1049,7 +1055,7 @@ def _make_thumb(channel: int, time: str, scale: int = 320) -> Path:
 # _BG_GATE: one pull at a time and never in the way of playback. CPU per thumb is
 # a single keyframe decode (~0.3 s).
 WARM_EVERY = 300          # s between passes
-THUMB_KEEP_DAYS = 45      # the NVR keeps ~41 days; older thumbs can't be clicked
+THUMB_KEEP_DAYS = 45      # fallback only; normally thumbs follow the NVR's oldest footage
 CLIP_KEEP_S = 86400       # cached playback chunks (in /tmp) are cheap to remake
 
 
@@ -1071,11 +1077,25 @@ def _warm_pass(days: list[str], failed: set) -> int:
     return made
 
 
+def _oldest_footage_day() -> str:
+    """'YYYYMMDD' of the oldest footage still on the NVR (thumbs older than that
+    point at overwritten video). Falls back to THUMB_KEEP_DAYS if unknown."""
+    try:
+        oldest = (health_status().get("nvr") or {}).get("oldest_footage")
+        if oldest:
+            return oldest[:10].replace("-", "")
+    except Exception:
+        pass
+    return (datetime.now() - timedelta(days=THUMB_KEEP_DAYS)).strftime("%Y%m%d")
+
+
 def _prune_caches() -> None:
     now = time.time()
+    keep_from = _oldest_footage_day()
     for f in THUMB_DIR.glob("thumb_*.jpg"):
-        if now - f.stat().st_mtime > THUMB_KEEP_DAYS * 86400:
-            f.unlink(missing_ok=True)
+        day = f.name.split("_")[1]
+        if not (len(day) == 8 and day.isdigit()) or day < keep_from:
+            f.unlink(missing_ok=True)     # also drops old-style names without a day
     for f in CACHE_DIR.glob("clip_*"):
         if now - f.stat().st_mtime > CLIP_KEEP_S:
             f.unlink(missing_ok=True)
