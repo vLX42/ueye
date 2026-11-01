@@ -8,6 +8,7 @@ keeps things simple and avoids a stale session if the NVR drops us.
 """
 from __future__ import annotations
 
+import os
 import sys
 import asyncio
 import hashlib
@@ -136,12 +137,19 @@ _BG_GATE = threading.Semaphore(1)
 # the cache instead of re-pulling 4K from the NVR.
 CACHE_DIR = Path("/tmp/ipcam-cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# Thumbnails live next to config.yaml (the appdata share) so a container update
+# doesn't throw them away: ~15 KB each, a few thousand for the NVR's ~6 weeks.
+THUMB_DIR = Path(os.environ.get("NVR_CONFIG", "/config/config.yaml")).parent / "thumbs"
+try:
+    THUMB_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:          # read-only config dir: fall back to the temp cache
+    THUMB_DIR = CACHE_DIR
 _FMT = "%Y-%m-%d %H:%M:%S"
 
 
 def _cache_path(kind: str, key: str, ext: str) -> Path:
     h = hashlib.sha1(key.encode()).hexdigest()[:20]
-    return CACHE_DIR / f"{kind}_{h}.{ext}"
+    return (THUMB_DIR if kind == "thumb" else CACHE_DIR) / f"{kind}_{h}.{ext}"
 
 
 def _norm_time(t: str) -> str:
@@ -970,8 +978,17 @@ def export_file(jid: str):
     return FileResponse(path, media_type="video/mp4", filename=job["filename"])
 
 
+# A thumbnail is a past moment: it never changes, so the browser may keep it.
+_THUMB_HEADERS = {"Cache-Control": "private, max-age=2592000, immutable"}
+
+
 @app.get("/api/thumb")
 def thumb(channel: int, time: str, scale: int = 320) -> Response:
+    return FileResponse(_make_thumb(channel, time, scale), media_type="image/jpeg",
+                        headers=_THUMB_HEADERS)
+
+
+def _make_thumb(channel: int, time: str, scale: int = 320) -> Path:
     """A single JPEG frame grabbed at `time` (for timeline hover + event cards).
 
     Takes the first COMPLETE keyframe at/after `time`: the download stops as soon
@@ -983,14 +1000,14 @@ def thumb(channel: int, time: str, scale: int = 320) -> Response:
     time = _norm_time(time)
     cache = _cache_path("thumb", f"{channel}|{time}|{scale}", "jpg")
     if cache.exists() and cache.stat().st_size > 0:
-        return FileResponse(cache, media_type="image/jpeg")
+        return cache
     rec = _file_at(channel, time)
     if not rec:
         raise HTTPException(status_code=404, detail="no footage at that time")
     end = min((datetime.strptime(time, _FMT) + timedelta(seconds=THUMB_WINDOW)).strftime(_FMT), rec["end"])
     with _BG_GATE, _PLAYBACK_SEM:
         if cache.exists() and cache.stat().st_size > 0:
-            return FileResponse(cache, media_type="image/jpeg")
+            return cache
         try:
             with nvr() as c:
                 demux = sofia.StreamDemux(from_keyframe=True)
@@ -1022,7 +1039,69 @@ def thumb(channel: int, time: str, scale: int = 320) -> Response:
             tmp.replace(cache)
         except DVRIPError:
             raise HTTPException(status_code=404, detail="no frame at that time")
-    return FileResponse(cache, media_type="image/jpeg")
+    return cache
+
+
+# --- background thumbnail warmer + cache cleanup -----------------------------
+# Makes the event-rail thumbnail of every new motion/alarm event ahead of time,
+# so opening Recordings shows them at once instead of pulling each from the NVR
+# on demand (~2 s apiece, one at a time). Runs through _make_thumb, i.e. behind
+# _BG_GATE: one pull at a time and never in the way of playback. CPU per thumb is
+# a single keyframe decode (~0.3 s).
+WARM_EVERY = 300          # s between passes
+THUMB_KEEP_DAYS = 45      # the NVR keeps ~41 days; older thumbs can't be clicked
+CLIP_KEEP_S = 86400       # cached playback chunks (in /tmp) are cheap to remake
+
+
+def _warm_pass(days: list[str], failed: set) -> int:
+    made = 0
+    for day in days:
+        for ch in CFG.channels:
+            for r in _files_for(ch.id, day):
+                if r.get("type") not in ("motion", "alarm") or r["begin"][:10] != day:
+                    continue
+                key = (ch.id, r["begin"])
+                if key in failed or _cache_path("thumb", f"{ch.id}|{r['begin']}|320", "jpg").exists():
+                    continue
+                try:
+                    _make_thumb(ch.id, r["begin"])
+                    made += 1
+                except Exception:
+                    failed.add(key)       # no frame there: don't retry every pass
+    return made
+
+
+def _prune_caches() -> None:
+    now = time.time()
+    for f in THUMB_DIR.glob("thumb_*.jpg"):
+        if now - f.stat().st_mtime > THUMB_KEEP_DAYS * 86400:
+            f.unlink(missing_ok=True)
+    for f in CACHE_DIR.glob("clip_*"):
+        if now - f.stat().st_mtime > CLIP_KEEP_S:
+            f.unlink(missing_ok=True)
+
+
+def _warm_loop() -> None:
+    time.sleep(30)                         # let startup + first page loads go first
+    failed: set = set()
+    first = True
+    while True:
+        try:
+            now = datetime.now()
+            days = [now.strftime("%Y-%m-%d")]
+            if first or now.hour == 0:     # yesterday too: on start and just after midnight
+                days.append((now - timedelta(days=1)).strftime("%Y-%m-%d"))
+            made = _warm_pass(days, failed)
+            if made:
+                print(f"[thumbs] made {made} event thumbnails", flush=True)
+            _prune_caches()
+            first = False
+        except Exception as e:
+            print(f"[thumbs] warm pass failed: {e}", flush=True)
+        time.sleep(WARM_EVERY)
+
+
+threading.Thread(target=_warm_loop, daemon=True, name="thumb-warmer").start()
 
 
 # ============================================================================
