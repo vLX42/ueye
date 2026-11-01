@@ -44,6 +44,9 @@ try:
     import faces as faceslib  # noqa: E402
     import faceindex  # noqa: E402
     import persons  # noqa: E402
+    # Background scanning must stay light on the NAS: OpenCV would otherwise use
+    # every core for each detector run (measured ~3.4 of 8 cores while scanning).
+    cv2.setNumThreads(1)
     import visitorindex  # noqa: E402
     faceindex.init_db()
     visitorindex.init_db()
@@ -148,6 +151,12 @@ try:
 except OSError:          # read-only config dir: fall back to the temp cache
     THUMB_DIR = CACHE_DIR
 _FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _low_prio() -> None:
+    """preexec_fn for background ffmpeg runs (thumbnails, scan frames): one
+    thread (-threads 1) at low priority, so live view and playback come first."""
+    os.nice(10)
 
 
 def _cache_path(kind: str, key: str, ext: str) -> Path:
@@ -1036,11 +1045,11 @@ def _make_thumb(channel: int, time: str, scale: int = 320) -> Path:
             if not es:
                 raise HTTPException(status_code=404, detail="no frame at that time")
             in_fmt = "hevc" if sofia.detect_codec(es) == "hevc" else "h264"
-            args = ["ffmpeg", "-nostdin", "-loglevel", "error", "-skip_frame", "nokey",
+            args = ["ffmpeg", "-nostdin", "-threads", "1", "-loglevel", "error", "-skip_frame", "nokey",
                     "-f", in_fmt, "-i", "pipe:0", "-frames:v", "1",
                     "-vf", f"scale='min({scale},iw)':-2", "-q:v", "4",
                     "-f", "image2", "pipe:1"]
-            proc = subprocess.run(args, input=es, capture_output=True)
+            proc = subprocess.run(args, input=es, capture_output=True, preexec_fn=_low_prio)
             if proc.returncode != 0 or not proc.stdout:
                 raise HTTPException(status_code=500, detail="thumb encode failed")
             tmp = cache.with_suffix(".part")
@@ -1184,10 +1193,10 @@ def _frames_bgr(channel: int, ts: str, secs: int = 15, cap: int = 12) -> list:
         return []
     in_fmt = "hevc" if sofia.detect_codec(es) == "hevc" else "h264"
     ss = ["-ss", f"{trim:.3f}"] if trim > 0 else []
-    args = ["ffmpeg", "-nostdin", "-loglevel", "error", "-skip_frame", "nokey",
+    args = ["ffmpeg", "-nostdin", "-threads", "1", "-loglevel", "error", "-skip_frame", "nokey",
             "-f", in_fmt, "-i", "pipe:0", *ss, "-vsync", "0",
             "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"]
-    proc = subprocess.run(args, input=es, capture_output=True)
+    proc = subprocess.run(args, input=es, capture_output=True, preexec_fn=_low_prio)
     data = proc.stdout or b""
     frames, i = [], 0
     while len(frames) < cap:
