@@ -1006,7 +1006,8 @@ function renderEvents() {
   if (thumbObserver) thumbObserver.disconnect();
   THUMBQ.q = [];
   thumbObserver = new IntersectionObserver(ents => {
-    for (const en of ents) {
+    // reversed: the queue pops from the end, so a screenful loads left to right
+    for (const en of [...ents].reverse()) {
       const img = en.target, i = THUMBQ.q.indexOf(img);
       if (i >= 0) THUMBQ.q.splice(i, 1);            // scrolled away: forget it
       if (en.isIntersecting) THUMBQ.q.push(img);    // (re)entered: goes next

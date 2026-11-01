@@ -291,3 +291,16 @@ video-stream .info .mode { display: none; }
 .h-reboot { display: flex; gap: .8rem; align-items: center; justify-content: space-between; flex-wrap: wrap; width: 100%; }
 .h-reboot-btn.armed { background: var(--danger); color: #fff; }
 .h-err { color: var(--danger); }
+
+/* event-rail thumbnail placeholder: shimmer while waiting/loading, quiet box if none */
+.ev-thumb:not([data-state="done"]):not([data-state="failed"]) {
+  background: linear-gradient(100deg, #0b0f14 30%, #1c2733 50%, #0b0f14 70%) 0 0 / 300% 100%;
+  animation: ev-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes ev-shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+@media (prefers-reduced-motion: reduce) { .ev-thumb { animation: none !important; } }
+.ev-card { position: relative; }
+.ev-card:has(.ev-thumb[data-state="failed"])::after {
+  content: "no preview"; position: absolute; left: 0; right: 0; top: 0; aspect-ratio: 16/9;
+  display: grid; place-items: center; color: var(--muted); font-size: .72rem; pointer-events: none;
+}
