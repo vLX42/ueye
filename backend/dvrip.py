@@ -45,6 +45,8 @@ TALK_DATA = 1432             # TALK_CU_PU_DATA: audio frames client -> device sp
 GUARD_REQ = 1500
 UNGUARD_REQ = 1502
 ALARM_REQ = 1504               # alarm channel (motion events)
+TIME_SET = 1450                # OPTimeSetting (set device clock)
+TIME_QUERY = 1452              # OPTimeQuery (read device clock)
 
 HEADER_MAGIC = 0xFF
 HEADER_LEN = 20
@@ -215,6 +217,16 @@ class DVRIPClient:
         """Write a config section back. `value` is the section body as returned
         by get_config()."""
         return self._cmd(CONFIG_SET, {"Name": name, "SessionID": self._sid_str(), name: value})
+
+    def get_time(self) -> str:
+        """Device wall clock as 'YYYY-MM-DD HH:MM:SS' (device local time)."""
+        resp = self._cmd(TIME_QUERY, {"Name": "OPTimeQuery", "SessionID": self._sid_str()})
+        return str(resp.get("OPTimeQuery", ""))
+
+    def set_time(self, local: str) -> dict[str, Any]:
+        """Set the device clock; `local` = 'YYYY-MM-DD HH:MM:SS' in device local time."""
+        return self._cmd(TIME_SET, {"Name": "OPTimeSetting", "SessionID": self._sid_str(),
+                                    "OPTimeSetting": local})
 
     def channel_count(self) -> int:
         info = self.system_info().get("SystemInfo", {})

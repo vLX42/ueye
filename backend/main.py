@@ -273,6 +273,50 @@ def nvr():
         c.close()
 
 
+# --- NVR clock sync -----------------------------------------------------------
+# The NVR is firewalled off the internet, so it has no NTP. Keep its clock
+# right from the NAS (container TZ = local time): check at startup + hourly,
+# correct when it's off by more than TIME_MAX_DRIFT seconds.
+TIME_SYNC_EVERY = 3600
+TIME_MAX_DRIFT = 2
+_time_state: dict[str, Any] = {"last_check": None, "drift_s": None, "last_set": None, "error": None}
+
+
+def _sync_nvr_time() -> None:
+    c = DVRIPClient(host=CFG.host, port=CFG.port, username=CFG.username, password=CFG.password)
+    try:
+        c.connect()
+        nvr_t = datetime.strptime(c.get_time(), _FMT)
+        now = datetime.now()
+        drift = round((nvr_t - now).total_seconds())
+        _time_state.update(last_check=now.strftime(_FMT), drift_s=drift, error=None)
+        if abs(drift) > TIME_MAX_DRIFT:
+            r = c.set_time(datetime.now().strftime(_FMT))
+            if str(r.get("Ret")) != "100":
+                raise DVRIPError(f"OPTimeSetting failed: {r!r}")
+            _time_state["last_set"] = datetime.now().strftime(_FMT)
+            print(f"[time] NVR clock was {drift:+d}s off, corrected", flush=True)
+    except Exception as e:  # never let the loop die
+        _time_state["error"] = str(e)
+        print(f"[time] sync failed: {e}", flush=True)
+    finally:
+        c.close()
+
+
+def _time_sync_loop() -> None:
+    while True:
+        _sync_nvr_time()
+        time.sleep(TIME_SYNC_EVERY)
+
+
+threading.Thread(target=_time_sync_loop, daemon=True, name="nvr-time-sync").start()
+
+
+@app.get("/api/nvr-time")
+def nvr_time():
+    return _time_state
+
+
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "nvr": f"{CFG.host}:{CFG.port}",
