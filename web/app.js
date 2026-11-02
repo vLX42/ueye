@@ -1348,23 +1348,23 @@ async function setPause(minutes, btn) {
   try { PAUSE = await api('/pause', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ minutes }) }); }
   catch (e) { alertBox(btn || $('#pause-btn'), e.message); }
   finally { if (btn) btn.disabled = false; }
-  $('#pause-menu').classList.add('hidden');
+  $('#pause-btn').value = '';
   renderPause();
 }
 function bindPause() {
-  const menu = $('#pause-menu');
-  for (const [label, m] of PAUSE_CHOICES) {
-    const b = el('button', 'pb-btn', label);
-    b.onclick = () => setPause(typeof m === 'function' ? m() : m, b);
-    menu.appendChild(b);
-  }
-  $('#pause-btn').onclick = () => menu.classList.toggle('hidden');
+  const sel = $('#pause-btn');
+  PAUSE_CHOICES.forEach(([label], i) => { const o = el('option', null, label); o.value = i; sel.appendChild(o); });
+  sel.onchange = () => {
+    if (sel.value === '') return;
+    const m = PAUSE_CHOICES[+sel.value][1];
+    setPause(typeof m === 'function' ? m() : m, sel);
+  };
   $('#pause-more').onclick = () => setPause(Math.max(1, Math.round((PAUSE.until * 1000 - Date.now()) / 60000)) + 60, $('#pause-more'));
   $('#pause-resume').onclick = async () => {
-    const b = $('#pause-resume'); b.disabled = true; b.textContent = 'Resuming…';
+    const b = $('#pause-resume'), html = b.innerHTML; b.disabled = true; b.textContent = 'Resuming…';
     try { PAUSE = await api('/pause/resume', { method: 'POST' }); }
     catch (e) { alertBox(b, e.message); }
-    finally { b.disabled = false; b.textContent = 'Resume now'; }
+    finally { b.disabled = false; b.innerHTML = html; }
     renderPause();
   };
   setInterval(() => { if (!document.hidden) refreshPause(); }, 30000);

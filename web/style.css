@@ -320,12 +320,19 @@ video-stream .info .mode { display: none; }
 .fx-merge select { max-width: 280px; }
 
 /* pause all cameras */
-.live-bar { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .6rem; }
-.pause-menu { display: flex; gap: .35rem; flex-wrap: wrap; }
+.pause-sel { appearance: none; -webkit-appearance: none; padding: .3rem .7rem; font-size: .8rem; }
 .pause-banner { display: flex; align-items: center; justify-content: space-between; gap: .6rem; flex-wrap: wrap;
   background: #3a2a0c; border: 1px solid #d29922; color: #f5d78e; border-radius: 10px; padding: .55rem .8rem; margin-bottom: .8rem; font-size: .9rem; }
-.pause-actions { display: flex; gap: .4rem; }
+.pause-actions { display: flex; gap: .4rem; flex-shrink: 0; }
+.pause-short { display: none; }
 .pause-resume { background: #d29922; color: #1a1205; font-weight: 600; }
 .pause-resume:hover { background: #e5ad3a; }
 .tile-paused { display: flex; align-items: center; justify-content: center; }
 .tile-paused-txt { color: var(--muted); font-size: 1.1rem; }
+@media (max-width: 640px) {
+  .pause-long { display: none; }
+  .pause-short { display: inline; }
+  .pause-txt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .pause-banner { padding: .4rem .6rem; font-size: .82rem; flex-wrap: nowrap; margin-bottom: .5rem; }
+  .pause-banner .pb-btn { padding: .3rem .55rem; font-size: .78rem; white-space: nowrap; }
+}
