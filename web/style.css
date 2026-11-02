@@ -318,3 +318,14 @@ video-stream .info .mode { display: none; }
 .vx-strip img:hover { outline: 2px solid var(--accent); }
 .fx-merge { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .2rem 0 .8rem; }
 .fx-merge select { max-width: 280px; }
+
+/* pause all cameras */
+.live-bar { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .6rem; }
+.pause-menu { display: flex; gap: .35rem; flex-wrap: wrap; }
+.pause-banner { display: flex; align-items: center; justify-content: space-between; gap: .6rem; flex-wrap: wrap;
+  background: #3a2a0c; border: 1px solid #d29922; color: #f5d78e; border-radius: 10px; padding: .55rem .8rem; margin-bottom: .8rem; font-size: .9rem; }
+.pause-actions { display: flex; gap: .4rem; }
+.pause-resume { background: #d29922; color: #1a1205; font-weight: 600; }
+.pause-resume:hover { background: #e5ad3a; }
+.tile-paused { display: flex; align-items: center; justify-content: center; }
+.tile-paused-txt { color: var(--muted); font-size: 1.1rem; }

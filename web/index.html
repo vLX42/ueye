@@ -17,7 +17,7 @@
        works fully offline. Loaded before style.css so the hand-written component
        styles win on any conflict. -->
   <link rel="stylesheet" href="tailwind.css?v=19" />
-  <link rel="stylesheet" href="style.css?v=32" />
+  <link rel="stylesheet" href="style.css?v=33" />
   <!-- go2rtc web component: <video-stream> handles MSE/WebRTC fallback -->
   <script type="module" src="/go2rtc/video-stream.js"></script>
 </head>
@@ -34,7 +34,15 @@
   </header>
 
   <main class="p-3 sm:p-4 lg:p-6 mx-auto w-full max-w-screen2k">
+    <div id="pause-banner" class="pause-banner hidden">
+      <span class="pause-txt"><b>⏸ Cameras paused</b> until <b id="pause-until"></b>. Not recording, no motion alerts.</span>
+      <span class="pause-actions"><button id="pause-more" class="pb-btn">+1 hour</button><button id="pause-resume" class="pb-btn pause-resume">Resume now</button></span>
+    </div>
     <section id="live" class="view active">
+      <div class="live-bar">
+        <button id="pause-btn" class="pb-btn" title="Stop recording and motion alerts for a while; they come back on by themselves">⏸ Pause cameras</button>
+        <div id="pause-menu" class="pause-menu hidden"></div>
+      </div>
       <div id="grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-2 sm:gap-3"></div>
     </section>
 
@@ -144,6 +152,6 @@
     </section>
   </main>
 
-  <script src="app.js?v=34"></script>
+  <script src="app.js?v=35"></script>
 </body>
 </html>

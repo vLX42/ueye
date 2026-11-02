@@ -179,6 +179,7 @@ async function renderHealth() {
   html += row(c.error ? 'bad' : c.drift_s == null ? 'warn' : 'ok', 'Clock',
     c.error ? `Sync failed: ${c.error}` : c.drift_s == null ? 'Not checked yet'
       : `In sync (${c.drift_s >= 0 ? '+' : ''}${c.drift_s} s), checked ${fmtWhen(c.last_check)}${c.last_set ? `, last corrected ${fmtWhen(c.last_set)}` : ''}`);
+  if (h.pause?.paused) html += row('warn', 'Cameras paused', `Not recording, no motion alerts. Back on ${fmtUntil(h.pause.until)}${h.pause.error ? ` (last resume attempt failed: ${h.pause.error})` : ''}`);
   html += (n ? '</section>' : '');
   html += `<section><h3>uEye on the NAS</h3>${row('ok', 'Disk use', `Alert thumbnails ${fmtBytes(h.nas.thumbs_bytes || 0)} (kept as long as the NVR keeps the video) · playback cache ${fmtBytes(h.nas.cache_bytes)} · exports ${fmtBytes(h.nas.exports_bytes)}`)}</section>`;
   html += `<section><h3>Maintenance</h3><div class="h-row"><div class="h-reboot">
@@ -699,6 +700,14 @@ async function renderGrid() {
   // ever opens and the tile stays black. Wait for the definition first.
   await customElements.whenDefined('video-stream');
   if (gen !== gridGen) return;  // stopGrid/renderGrid ran while we waited
+  if (PAUSE.paused) {           // privacy pause: no live video either
+    for (const ch of CHANNELS) {
+      const tile = el('div', 'tile tile-paused');
+      tile.append(el('span', 'label', ch.name), el('span', 'tile-paused-txt', '⏸ Paused'));
+      grid.appendChild(tile);
+    }
+    return;
+  }
   for (const ch of CHANNELS) {
     const tile = document.createElement('div');
     tile.className = 'tile';
@@ -1308,6 +1317,60 @@ function bindRecordingControls() {
 }
 
 // --- boot -------------------------------------------------------------------
+// --- pause all cameras for a while ---------------------------------------------
+// Recording + motion alerts off on the NVR, live hidden here; the server turns
+// everything back on when the time is up (even if nobody has uEye open).
+let PAUSE = { paused: false };
+const PAUSE_CHOICES = [['1 hour', 60], ['2 hours', 120], ['4 hours', 240], ['8 hours', 480],
+  ['Until 07:00', () => { const d = new Date(); d.setHours(7, 0, 0, 0); if (d <= new Date()) d.setDate(d.getDate() + 1); return Math.round((d - new Date()) / 60000); }],
+  ['1 day', 1440], ['2 days', 2880]];
+const fmtUntil = ts => {
+  const d = new Date(ts * 1000), now = new Date();
+  const t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (d.toDateString() === now.toDateString()) return t;
+  const tom = new Date(now); tom.setDate(now.getDate() + 1);
+  return d.toDateString() === tom.toDateString() ? `tomorrow ${t}` : `${d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })} ${t}`;
+};
+async function refreshPause() {
+  try { PAUSE = await api('/pause'); } catch { return; }
+  renderPause();
+}
+function renderPause() {
+  const was = $('#pause-banner').dataset.paused === '1';
+  $('#pause-banner').dataset.paused = PAUSE.paused ? '1' : '0';
+  $('#pause-banner').classList.toggle('hidden', !PAUSE.paused);
+  $('#pause-btn').classList.toggle('hidden', PAUSE.paused);
+  if (PAUSE.paused) $('#pause-until').textContent = fmtUntil(PAUSE.until);
+  if (was !== PAUSE.paused && $('#live').classList.contains('active') && !document.hidden) renderGrid();
+}
+async function setPause(minutes, btn) {
+  if (btn) btn.disabled = true;
+  try { PAUSE = await api('/pause', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ minutes }) }); }
+  catch (e) { alertBox(btn || $('#pause-btn'), e.message); }
+  finally { if (btn) btn.disabled = false; }
+  $('#pause-menu').classList.add('hidden');
+  renderPause();
+}
+function bindPause() {
+  const menu = $('#pause-menu');
+  for (const [label, m] of PAUSE_CHOICES) {
+    const b = el('button', 'pb-btn', label);
+    b.onclick = () => setPause(typeof m === 'function' ? m() : m, b);
+    menu.appendChild(b);
+  }
+  $('#pause-btn').onclick = () => menu.classList.toggle('hidden');
+  $('#pause-more').onclick = () => setPause(Math.max(1, Math.round((PAUSE.until * 1000 - Date.now()) / 60000)) + 60, $('#pause-more'));
+  $('#pause-resume').onclick = async () => {
+    const b = $('#pause-resume'); b.disabled = true; b.textContent = 'Resuming…';
+    try { PAUSE = await api('/pause/resume', { method: 'POST' }); }
+    catch (e) { alertBox(b, e.message); }
+    finally { b.disabled = false; b.textContent = 'Resume now'; }
+    renderPause();
+  };
+  setInterval(() => { if (!document.hidden) refreshPause(); }, 30000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshPause(); });
+}
+
 let statusTimer;
 function setStatus(msg) {
   const e = $('#status'); e.textContent = msg;
@@ -1323,6 +1386,8 @@ async function boot() {
     setStatus('Cannot reach backend: ' + e.message);
     return;
   }
+  bindPause();
+  await refreshPause();
   renderGrid();
   logView('live');
   // recordings timeline: wire controls and default to today (rendered on show)

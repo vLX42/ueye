@@ -35,6 +35,7 @@ import sofia  # noqa: E402
 import auth  # noqa: E402
 import seasons  # noqa: E402
 import accesslog  # noqa: E402
+import pause  # noqa: E402
 
 # Face sorting is optional: if the CV stack isn't installed the rest of the API
 # still works and the face endpoints report unavailable.
@@ -447,6 +448,73 @@ def nvr_reboot(request: Request):
     return {"ok": True}
 
 
+# --- pause all cameras for a while -------------------------------------------
+def _connect() -> DVRIPClient:
+    c = DVRIPClient(host=CFG.host, port=CFG.port, username=CFG.username, password=CFG.password)
+    c.connect()
+    return c
+
+
+def _fmt_pause(minutes: int) -> str:
+    return f"{minutes // 60} h" if minutes % 60 == 0 else f"{minutes} min" if minutes < 60 else f"{minutes / 60:.1f} h"
+
+
+class PauseBody(BaseModel):
+    minutes: int
+
+
+@app.get("/api/pause")
+def pause_status():
+    return pause.status()
+
+
+@app.post("/api/pause")
+def pause_start(body: PauseBody, request: Request):
+    global _health_cache
+    was = pause.status()["paused"]
+    try:
+        st = pause.pause(_connect, body.minutes)
+    except Exception as e:
+        accesslog.record(accesslog.client(request), "Paused cameras", f"failed: {e}", ok=False)
+        raise HTTPException(status_code=502, detail=f"Could not pause: {e}")
+    until = datetime.fromtimestamp(st["until"]).strftime("%d %b %H:%M")
+    accesslog.record(accesslog.client(request), "Paused cameras" if not was else "Changed pause",
+                     f"{_fmt_pause(body.minutes)}, until {until}")
+    _health_cache = None
+    return st
+
+
+@app.post("/api/pause/resume")
+def pause_resume(request: Request):
+    global _health_cache
+    try:
+        done = pause.resume(_connect)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not resume: {e}")
+    if done:
+        accesslog.record(accesslog.client(request), "Resumed cameras")
+    _health_cache = None
+    return pause.status()
+
+
+def _pause_loop() -> None:
+    """Resume when the pause runs out (also right after a restart)."""
+    global _health_cache
+    while True:
+        try:
+            if pause.due() and pause.resume(_connect):
+                accesslog.record({"ip": "uEye", "home": True, "device": "timer", "session": ""},
+                                 "Resumed cameras", "pause ended")
+                _health_cache = None
+                print("[pause] time is up, cameras resumed", flush=True)
+        except Exception as e:     # NVR busy/offline: try again next round
+            print(f"[pause] resume failed, retrying: {e}", flush=True)
+        time.sleep(15)
+
+
+threading.Thread(target=_pause_loop, daemon=True, name="pause-timer").start()
+
+
 @app.get("/api/nvr-time")
 def nvr_time():
     return _time_state
@@ -526,6 +594,7 @@ def health_status():
         _health_cache = (now, data)
         data = dict(data)
     data["clock"] = _time_state
+    data["pause"] = pause.status()
     data["nas"] = {"cache_bytes": _dir_size(CACHE_DIR) - _dir_size(EXPORT_DIR),
                    "exports_bytes": _dir_size(EXPORT_DIR),
                    "thumbs_bytes": _dir_size(THUMB_DIR) if THUMB_DIR != CACHE_DIR else 0,
