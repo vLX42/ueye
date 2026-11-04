@@ -835,10 +835,32 @@ function sendTalk(line, buf) {
   else if (line.ws.readyState === 0) line.queue.push(buf);
 }
 
+// One AudioContext for every press, created inside the first press (iOS
+// leaves a context created outside a gesture suspended) and suspended between
+// presses. The capture worklet module is loaded once per context.
+let TALK_CTX = null, TALK_WORKLET = null;
+function talkContext() {
+  if (!TALK_CTX || TALK_CTX.state === 'closed') {
+    TALK_CTX = new (window.AudioContext || window.webkitAudioContext)();
+    TALK_WORKLET = TALK_CTX.audioWorklet
+      ? TALK_CTX.audioWorklet.addModule('talk-worklet.js?v=1').then(() => true, () => false)
+      : Promise.resolve(false);
+  }
+  TALK_CTX.resume?.();
+  return TALK_CTX;
+}
+// iOS 16.4+: say we record while talking, plain playback otherwise, so the
+// camera's reply comes out of the loudspeaker and not the quiet earpiece.
+function setAudioSession(type) {
+  try { if (navigator.audioSession) navigator.audioSession.type = type; } catch {}
+}
+
 // Mute every live tile while talking, else the camera mic picks up its own
 // speaker and it loops back through ours (echo). After release the camera we
 // talked to is unmuted (to hear the reply) once the echo of our own voice has
 // played out of the lagging live video; the others get their state back.
+// Safari may pause a video that is unmuted outside a tap: then it stays muted,
+// keeps playing, and the tile offers a tap-to-hear button instead.
 let talkMuted = null, unmuteTimer = null;
 function muteLive() {
   clearTimeout(unmuteTimer); unmuteTimer = null;
@@ -854,9 +876,52 @@ function unmuteLive(replyVideo) {
   unmuteTimer = setTimeout(() => {
     unmuteTimer = null;
     if (talkMuted !== saved) return;   // talking again: stays muted
-    if (replyVideo?.isConnected) replyVideo.muted = false;
     talkMuted = null;
+    if (!replyVideo?.isConnected) return;
+    replyVideo.muted = false;
+    setTimeout(() => {
+      if (!replyVideo.paused || !replyVideo.isConnected) return;
+      replyVideo.muted = true;          // blocked: keep the picture going
+      replyVideo.play?.().catch(() => {});
+      if (!talkMuted) offerSound(replyVideo);   // not while talking again
+    }, 400);
   }, TALK_UNMUTE_MS);
+}
+function offerSound(video) {
+  const tile = video.closest('.tile');
+  if (!tile || tile.querySelector('.tile-sound')) return;
+  const b = el('button', 'tile-sound', '🔈 Tap to hear');
+  b.onclick = () => { video.muted = false; video.play?.().catch(() => {}); b.remove(); };
+  tile.appendChild(b);
+  setTimeout(() => b.remove(), 15000);
+}
+
+// Talk state shown on the tile itself: on a phone the status line is at the
+// top of the page and the thumb covers the button.
+function talkPill(tile, state, text) {
+  if (!tile) return null;
+  let pill = tile.querySelector('.talk-pill');
+  if (!state) { pill?.remove(); tile.classList.remove('tile-talking'); return null; }
+  if (!pill) {
+    pill = el('div', 'talk-pill');
+    pill.append(el('span', 'talk-pill-txt'), el('span', 'talk-meter'));
+    pill.querySelector('.talk-meter').appendChild(el('i'));
+    tile.appendChild(pill);
+  }
+  clearTimeout(pill._hide);
+  pill.dataset.state = state;
+  pill.querySelector('.talk-pill-txt').textContent = text;
+  tile.classList.toggle('tile-talking', state === 'live' || state === 'connecting');
+  if (state === 'hint' || state === 'error') pill._hide = setTimeout(() => talkPill(tile, null), state === 'error' ? 5000 : 1800);
+  return pill;
+}
+
+function micError(e) {
+  const n = e && e.name;
+  if (n === 'NotAllowedError' || n === 'SecurityError')
+    return 'Microphone blocked. Allow it for this site in the browser settings.';
+  if (n === 'NotFoundError') return 'No microphone found.';
+  return `Talk failed: ${e?.message || e}`;
 }
 
 function wirePushToTalk(btn, channel) {
@@ -864,6 +929,7 @@ function wirePushToTalk(btn, channel) {
   // the mic prompt is still starting tears down whatever came up afterwards
   // instead of leaving the mic streaming.
   let s = null;
+  const tile = () => btn.closest('.tile');
 
   function start(ev) {
     ev.preventDefault();
@@ -874,64 +940,86 @@ function wirePushToTalk(btn, channel) {
     }
     // keep receiving pointerup even if the finger/cursor drifts off the button
     try { btn.setPointerCapture(ev.pointerId); } catch {}
-    s = { live: true, ctx: null, stream: null, node: null, src: null };
+    s = { live: true, t0: performance.now(), sent: 0, stream: null, node: null, src: null };
     stopActiveTalk = stop;
     muteLive();
     setTalkBusy(true);
+    setAudioSession('play-and-record');
+    $$('.tile-sound').forEach(b => b.remove());
     const line = openTalkLine(channel);
     clearTimeout(line.idle);
     s.line = line;
-    const showLive = () => { if (s?.line === line) { btn.classList.remove('talk-connecting'); btn.classList.add('talk-active'); } };
-    btn.classList.add(line.ready ? 'talk-active' : 'talk-connecting');
-    line.onReady = showLive;
-    line.onClose = e => {
-      if (s?.line !== line) return;
-      setStatus(e.code === 1013 ? 'Talk is busy on another camera' : `Talk failed${e.reason ? ': ' + e.reason : ''}`, true);
-      stop();
+    const cur = s;
+    const showLive = () => {
+      if (s !== cur) return;
+      btn.classList.remove('talk-connecting'); btn.classList.add('talk-active');
+      talkPill(tile(), 'live', `Talking to ${chName(channel)}`);
+      navigator.vibrate?.(15);
     };
-    setStatus(`Talking to ${chName(channel)}…`);
-    // Create the AudioContext synchronously inside the gesture: iOS Safari
-    // leaves one created after an await suspended (silent).
-    s.ctx = new (window.AudioContext || window.webkitAudioContext)();
-    s.ctx.resume?.();
-    run(s).catch(e => {
-      if (s?.live) setStatus(`Talk failed: ${e.message || e}`, true);
-      stop();
+    btn.classList.add('talk-connecting');
+    talkPill(tile(), 'connecting', 'Connecting…');
+    if (line.ready) showLive(); else line.onReady = showLive;
+    line.onClose = e => {
+      if (s !== cur) return;
+      talkPill(tile(), 'error', e.code === 1013 ? 'Talk is busy on another camera' : `Talk failed${e.reason ? ': ' + e.reason : ''}`);
+      stop(true);
+    };
+    // must be created/resumed synchronously inside the gesture (iOS)
+    s.ctx = talkContext();
+    run(cur).catch(e => {
+      if (s === cur) { talkPill(tile(), 'error', micError(e)); stop(true); }
     });
   }
 
   async function run(cur) {
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
     if (!cur.live) { stream.getTracks().forEach(t => t.stop()); return; }
     cur.stream = stream;
-
     const ctx = cur.ctx;
+    const useWorklet = await TALK_WORKLET;
+    if (!cur.live) return;
     cur.src = ctx.createMediaStreamSource(stream);
-    cur.node = ctx.createScriptProcessor(1024, 1, 1);   // ~21 ms at 48 kHz
-    const ratio = ctx.sampleRate / 8000;
-    cur.node.onaudioprocess = (e) => {
+    const meter = tile()?.querySelector('.talk-meter i');
+    const onPcm = buf => {
       if (!cur.live) return;
-      const inp = e.inputBuffer.getChannelData(0);
-      // decimate input rate -> 8 kHz with a simple box average
-      const outLen = Math.floor(inp.length / ratio);
-      const pcm = new Int16Array(outLen);
-      for (let i = 0; i < outLen; i++) {
-        const from = Math.floor(i * ratio), to = Math.floor((i + 1) * ratio);
-        let acc = 0, n = 0;
-        for (let j = from; j < to && j < inp.length; j++) { acc += inp[j]; n++; }
-        let v = n ? acc / n : 0;
-        v = Math.max(-1, Math.min(1, v));
-        pcm[i] = v < 0 ? v * 32768 : v * 32767;
+      sendTalk(cur.line, buf);
+      cur.sent++;
+      // mic level on the tile, so you can see it hears you
+      if (meter && (cur.sent & 1)) {
+        const a = new Int16Array(buf); let peak = 0;
+        for (let i = 0; i < a.length; i += 4) { const v = Math.abs(a[i]); if (v > peak) peak = v; }
+        meter.style.transform = `scaleX(${Math.min(1, Math.sqrt(peak / 20000)).toFixed(2)})`;
       }
-      sendTalk(cur.line, pcm.buffer);
     };
+    if (useWorklet) {
+      cur.node = new AudioWorkletNode(ctx, 'talk-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+      cur.node.port.onmessage = e => onPcm(e.data);
+    } else {
+      // older browsers: ScriptProcessor (main thread), same 8 kHz downsampling
+      cur.node = ctx.createScriptProcessor(1024, 1, 1);
+      const ratio = ctx.sampleRate / 8000;
+      cur.node.onaudioprocess = (e) => {
+        const inp = e.inputBuffer.getChannelData(0);
+        const outLen = Math.floor(inp.length / ratio);
+        const pcm = new Int16Array(outLen);
+        for (let i = 0; i < outLen; i++) {
+          const from = Math.floor(i * ratio), to = Math.floor((i + 1) * ratio);
+          let acc = 0, n = 0;
+          for (let j = from; j < to && j < inp.length; j++) { acc += inp[j]; n++; }
+          let v = n ? acc / n : 0;
+          v = Math.max(-1, Math.min(1, v));
+          pcm[i] = v < 0 ? v * 32768 : v * 32767;
+        }
+        onPcm(pcm.buffer);
+      };
+    }
     cur.src.connect(cur.node);
-    cur.node.connect(ctx.destination);
+    cur.node.connect(ctx.destination);   // outputs silence; keeps the node pulled
   }
 
-  function stop() {
+  function stop(keepPill) {
     const cur = s;
     if (!cur) return;
     s = null;
@@ -939,22 +1027,28 @@ function wirePushToTalk(btn, channel) {
     if (stopActiveTalk === stop) stopActiveTalk = null;
     try { cur.node && cur.node.disconnect(); } catch {}
     try { cur.src && cur.src.disconnect(); } catch {}
-    try { cur.ctx && cur.ctx.close(); } catch {}
     try { cur.stream && cur.stream.getTracks().forEach(t => t.stop()); } catch {}
+    try { cur.ctx && cur.ctx.suspend(); } catch {}
+    setAudioSession('playback');
     // mic off now; the line stays open a little while for the next press
     if (LINE === cur.line) { cur.line.onReady = cur.line.onClose = null; idleTalkLine(cur.line); }
-    unmuteLive(btn.closest('.tile')?.querySelector('video'));
+    unmuteLive(tile()?.querySelector('video'));
     btn.classList.remove('talk-active', 'talk-connecting');
     setTalkBusy(false);
+    if (keepPill !== true) {
+      // a quick tap does nothing useful: say how it works
+      if (performance.now() - cur.t0 < 350) talkPill(tile(), 'hint', 'Hold to talk');
+      else talkPill(tile(), null);
+    }
     if ($('#status').textContent.startsWith('Talking to')) setStatus('');  // keep error messages
   }
 
   // Hold to talk: talks only while pressed (mouse or finger). With pointer
   // capture, release anywhere ends it; cancel covers the OS stealing the touch.
   btn.addEventListener('pointerdown', start);
-  btn.addEventListener('pointerup', stop);
-  btn.addEventListener('pointercancel', stop);
-  btn.addEventListener('lostpointercapture', stop);
+  btn.addEventListener('pointerup', () => stop());
+  btn.addEventListener('pointercancel', () => stop());
+  btn.addEventListener('lostpointercapture', () => stop());
   btn.addEventListener('contextmenu', e => e.preventDefault());  // long-press menu
   // With a mouse, open the line when the pointer reaches the button.
   btn.addEventListener('pointerenter', e => {
@@ -965,6 +1059,7 @@ function wirePushToTalk(btn, channel) {
 // Never keep the mic or the line open when the page is hidden or loses focus.
 function stopTalkAll() { stopActiveTalk?.(); closeTalkLine(); }
 window.addEventListener('blur', () => stopActiveTalk?.());
+window.addEventListener('pagehide', stopTalkAll);
 document.addEventListener('visibilitychange', () => { if (document.hidden) stopTalkAll(); });
 
 // Remove the live tiles -> each <video-stream>'s disconnectedCallback closes its

@@ -125,5 +125,21 @@ mics recorded at once. The target camera's own mic was 60+ dB louder than the
 others every time (Baghave 118 dB vs 57; Bagdør 125 vs 65; Forhave 124 vs 69),
 so Channel picks the right speaker; the DVRIP header channel byte stays 0.
 
-Still open: AudioWorklet instead of the deprecated ScriptProcessor; a phone has
-no hover, so its first press is still cold.
+Phone pass (4 Nov, later):
+- Mic capture runs in an AudioWorklet (`web/talk-worklet.js`, 20 ms chunks at
+  8 kHz), ScriptProcessor kept as fallback. One AudioContext reused across
+  presses and suspended in between.
+- Talk state on the tile itself (amber "Connecting…", red "Talking to X" with a
+  mic level meter, red outline), since the thumb covers the button and the
+  status line is at the top. Mic errors in plain words on the tile. A quick tap
+  shows "Hold to talk". Mic button 56 px on touch screens. Vibrates on Android
+  when live.
+- iOS: `navigator.audioSession` set to play-and-record while talking and back to
+  playback after, so the reply should come out of the loudspeaker. If Safari
+  pauses the video when it is unmuted after the 2.5 s delay (outside a tap), it
+  is re-muted, keeps playing, and the tile shows "🔈 Tap to hear".
+- Tested in Chromium with iPhone 13 emulation, touch events and a fake mic on
+  Bagdør: press to tone ~0.65 s. The Safari pause was simulated, not seen on a
+  real iPhone; audioSession and haptics are untested on real phones.
+
+Still open: a phone has no hover, so its first press is still cold.
