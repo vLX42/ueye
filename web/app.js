@@ -757,6 +757,7 @@ function buildTalkBar(channel) {
   fun.onclick = async () => {
     if (TALK_BUSY) return;
     setTalkBusy(true);
+    closeTalkLine();
     fun.classList.add('talk-active');
     fun.textContent = '🔊';
     try {
@@ -787,27 +788,81 @@ function buildTalkBar(channel) {
 // 8 kHz 16-bit PCM and stream it over a WebSocket; the backend a-law encodes
 // and pushes it to the camera. Needs a secure context (https or localhost) for
 // getUserMedia — over plain http on a LAN IP the browser blocks the mic.
-let stopActiveTalk = null;   // set while a push-to-talk session runs
+//
+// Opening the camera's talk line takes ~0.3 s, and audio captured meanwhile is
+// played late, so you stay that much behind for the whole press (the NVR plays
+// a backlog in real time, it never skips). So the line (WebSocket + NVR talk
+// session) is kept open for a while after you let go, and opened early on mouse
+// hover: the next press starts sending at once. The mic itself is only on while
+// the button is held.
+const TALK_IDLE_MS = 20000;     // keep the line this long after release / hover
+const TALK_UNMUTE_MS = 2500;    // live video lags: unmute after the echo of your voice
+let stopActiveTalk = null;      // set while the mic is on
+let LINE = null;                // { channel, ws, ready, queue, idle, onReady }
+
+function openTalkLine(channel) {
+  if (LINE && LINE.channel === channel && LINE.ws.readyState <= 1) return LINE;
+  closeTalkLine();
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const line = { channel, ready: false, queue: [], idle: null, onReady: null, onClose: null };
+  line.ws = new WebSocket(`${proto}://${location.host}/api/talk/ws/${channel}`);
+  line.ws.binaryType = 'arraybuffer';
+  line.ws.onopen = () => { for (const b of line.queue) line.ws.send(b); line.queue = []; };
+  line.ws.onmessage = e => {
+    try { if (JSON.parse(e.data).ok) { line.ready = true; line.onReady?.(); } } catch {}
+  };
+  line.ws.onclose = e => {
+    if (LINE === line) LINE = null;
+    clearTimeout(line.idle);
+    line.onClose?.(e);
+  };
+  LINE = line;
+  return line;
+}
+function closeTalkLine() {
+  const line = LINE;
+  LINE = null;
+  if (!line) return;
+  clearTimeout(line.idle);
+  try { line.ws.readyState <= 1 && line.ws.close(); } catch {}
+}
+function idleTalkLine(line) {
+  clearTimeout(line.idle);
+  line.idle = setTimeout(() => { if (LINE === line) closeTalkLine(); }, TALK_IDLE_MS);
+}
+function sendTalk(line, buf) {
+  if (line.ws.readyState === 1) line.ws.send(buf);
+  else if (line.ws.readyState === 0) line.queue.push(buf);
+}
 
 // Mute every live tile while talking, else the camera mic picks up its own
-// speaker and it loops back through ours (echo). On release the camera we
-// talked to is unmuted (to hear the reply); the others get their state back.
-let talkMuted = null;
+// speaker and it loops back through ours (echo). After release the camera we
+// talked to is unmuted (to hear the reply) once the echo of our own voice has
+// played out of the lagging live video; the others get their state back.
+let talkMuted = null, unmuteTimer = null;
 function muteLive() {
+  clearTimeout(unmuteTimer); unmuteTimer = null;
   if (talkMuted) return;
   talkMuted = $$('#grid video').map(v => [v, v.muted]);
   talkMuted.forEach(([v]) => { v.muted = true; });
 }
 function unmuteLive(replyVideo) {
   if (!talkMuted) return;
-  talkMuted.forEach(([v, was]) => { if (v.isConnected) v.muted = v === replyVideo ? false : was; });
-  talkMuted = null;
+  const saved = talkMuted;
+  saved.forEach(([v, was]) => { if (v.isConnected && v !== replyVideo) v.muted = was; });
+  clearTimeout(unmuteTimer);
+  unmuteTimer = setTimeout(() => {
+    unmuteTimer = null;
+    if (talkMuted !== saved) return;   // talking again: stays muted
+    if (replyVideo?.isConnected) replyVideo.muted = false;
+    talkMuted = null;
+  }, TALK_UNMUTE_MS);
 }
 
 function wirePushToTalk(btn, channel) {
   // One object per press. Every await re-checks `s.live`, so letting go while
-  // the mic prompt / WebSocket is still starting tears down whatever came up
-  // afterwards instead of leaving the mic streaming.
+  // the mic prompt is still starting tears down whatever came up afterwards
+  // instead of leaving the mic streaming.
   let s = null;
 
   function start(ev) {
@@ -819,11 +874,21 @@ function wirePushToTalk(btn, channel) {
     }
     // keep receiving pointerup even if the finger/cursor drifts off the button
     try { btn.setPointerCapture(ev.pointerId); } catch {}
-    s = { live: true, ws: null, ctx: null, stream: null, node: null, src: null, queue: [] };
+    s = { live: true, ctx: null, stream: null, node: null, src: null };
     stopActiveTalk = stop;
     muteLive();
     setTalkBusy(true);
-    btn.classList.add('talk-active');
+    const line = openTalkLine(channel);
+    clearTimeout(line.idle);
+    s.line = line;
+    const showLive = () => { if (s?.line === line) { btn.classList.remove('talk-connecting'); btn.classList.add('talk-active'); } };
+    btn.classList.add(line.ready ? 'talk-active' : 'talk-connecting');
+    line.onReady = showLive;
+    line.onClose = e => {
+      if (s?.line !== line) return;
+      setStatus(e.code === 1013 ? 'Talk is busy on another camera' : `Talk failed${e.reason ? ': ' + e.reason : ''}`, true);
+      stop();
+    };
     setStatus(`Talking to ${chName(channel)}…`);
     // Create the AudioContext synchronously inside the gesture: iOS Safari
     // leaves one created after an await suspended (silent).
@@ -836,16 +901,6 @@ function wirePushToTalk(btn, channel) {
   }
 
   async function run(cur) {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    // open the socket and the mic in parallel; audio is queued until the socket is up
-    cur.ws = new WebSocket(`${proto}://${location.host}/api/talk/ws/${channel}`);
-    cur.ws.binaryType = 'arraybuffer';
-    cur.ws.onclose = e => {
-      if (cur.live && e.code === 1013) setStatus('Talk is busy on another camera', true);
-      if (cur === s) stop();
-    };
-    cur.ws.onopen = () => { for (const b of cur.queue) cur.ws.send(b); cur.queue = []; };
-
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
     });
@@ -854,7 +909,7 @@ function wirePushToTalk(btn, channel) {
 
     const ctx = cur.ctx;
     cur.src = ctx.createMediaStreamSource(stream);
-    cur.node = ctx.createScriptProcessor(2048, 1, 1);
+    cur.node = ctx.createScriptProcessor(1024, 1, 1);   // ~21 ms at 48 kHz
     const ratio = ctx.sampleRate / 8000;
     cur.node.onaudioprocess = (e) => {
       if (!cur.live) return;
@@ -870,8 +925,7 @@ function wirePushToTalk(btn, channel) {
         v = Math.max(-1, Math.min(1, v));
         pcm[i] = v < 0 ? v * 32768 : v * 32767;
       }
-      if (cur.ws.readyState === 1) cur.ws.send(pcm.buffer);
-      else if (cur.ws.readyState === 0) cur.queue.push(pcm.buffer);
+      sendTalk(cur.line, pcm.buffer);
     };
     cur.src.connect(cur.node);
     cur.node.connect(ctx.destination);
@@ -887,9 +941,10 @@ function wirePushToTalk(btn, channel) {
     try { cur.src && cur.src.disconnect(); } catch {}
     try { cur.ctx && cur.ctx.close(); } catch {}
     try { cur.stream && cur.stream.getTracks().forEach(t => t.stop()); } catch {}
-    try { cur.ws && cur.ws.readyState <= 1 && cur.ws.close(); } catch {}
+    // mic off now; the line stays open a little while for the next press
+    if (LINE === cur.line) { cur.line.onReady = cur.line.onClose = null; idleTalkLine(cur.line); }
     unmuteLive(btn.closest('.tile')?.querySelector('video'));
-    btn.classList.remove('talk-active');
+    btn.classList.remove('talk-active', 'talk-connecting');
     setTalkBusy(false);
     if ($('#status').textContent.startsWith('Talking to')) setStatus('');  // keep error messages
   }
@@ -901,15 +956,21 @@ function wirePushToTalk(btn, channel) {
   btn.addEventListener('pointercancel', stop);
   btn.addEventListener('lostpointercapture', stop);
   btn.addEventListener('contextmenu', e => e.preventDefault());  // long-press menu
+  // With a mouse, open the line when the pointer reaches the button.
+  btn.addEventListener('pointerenter', e => {
+    if (e.pointerType !== 'mouse' || s || TALK_BUSY) return;
+    idleTalkLine(openTalkLine(channel));
+  });
 }
-// Never keep the mic open when the page is hidden or loses focus mid-press.
+// Never keep the mic or the line open when the page is hidden or loses focus.
+function stopTalkAll() { stopActiveTalk?.(); closeTalkLine(); }
 window.addEventListener('blur', () => stopActiveTalk?.());
-document.addEventListener('visibilitychange', () => { if (document.hidden) stopActiveTalk?.(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopTalkAll(); });
 
 // Remove the live tiles -> each <video-stream>'s disconnectedCallback closes its
 // go2rtc WebSocket, stopping the decode and releasing the NVR stream slot.
 function stopGrid() {
-  stopActiveTalk?.();
+  stopTalkAll();
   gridGen++;
   const grid = $('#grid');
   if (grid) grid.innerHTML = '';

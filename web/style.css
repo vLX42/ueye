@@ -48,6 +48,10 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
   background: #d1491f; border-color: #ff7a4d; color: #fff;
   box-shadow: 0 0 0 3px rgba(209,73,31,.35); animation: talk-pulse 1s infinite;
 }
+/* pressed, line still opening (~0.3 s): amber; turns red when audio goes out */
+.talk-btn.talk-connecting {
+  background: #b7791f; border-color: #f6c35b; color: #fff;
+}
 @keyframes talk-pulse { 50% { box-shadow: 0 0 0 7px rgba(209,73,31,0); } }
 
 .toolbar { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }

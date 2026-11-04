@@ -1588,6 +1588,8 @@ def set_motion(body: MotionToggle) -> dict[str, Any]:
 _TALK_LOCK = threading.Lock()
 _TALK_FRAME = 320       # G.711a bytes per sofia frame = 40 ms @ 8 kHz
 _TALK_PACE = 0.04       # seconds per frame, real-time
+_TALK_WAIT = 3.0        # wait this long for the talk lock (a closing line frees it)
+_TALK_IDLE = 30.0       # close a push-to-talk line that sent no audio for this long
 
 
 class TalkSession:
@@ -1670,7 +1672,8 @@ def talk_sound(body: TalkSound, request: Request) -> dict[str, Any]:
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown sound {body.sound!r}")
     accesslog.record(accesslog.client(request), "Played sound", f"{_cam(body.channel)}: {seasons.label_of(chosen)}")
-    if not _TALK_LOCK.acquire(blocking=False):
+    # a talk line the browser just closed may still be shutting down: wait a moment
+    if not _TALK_LOCK.acquire(timeout=_TALK_WAIT):
         raise HTTPException(status_code=409, detail="talk is busy on another camera")
     try:
         with TalkSession(body.channel) as talk:
@@ -1689,23 +1692,33 @@ def talk_sound(body: TalkSound, request: Request) -> dict[str, Any]:
 async def talk_ws(ws: WebSocket, channel: int) -> None:
     """Live push-to-talk. The browser streams little-endian 16-bit mono PCM @
     8 kHz as binary frames; we a-law encode each and push it to the camera.
-    Holds the talk session for the life of the socket."""
+    Holds the talk session for the life of the socket. The browser opens the
+    line before talking and keeps it a while after, so a press starts sending
+    at once; a line with no audio for _TALK_IDLE seconds is closed here."""
     await ws.accept()
-    accesslog.record(accesslog.client(ws), "Talk", _cam(channel))
-    if not _TALK_LOCK.acquire(blocking=False):
+    if not await asyncio.to_thread(_TALK_LOCK.acquire, True, _TALK_WAIT):
         await ws.close(code=1013, reason="talk busy")   # try again later
         return
     talk: TalkSession | None = None
+    logged = False
     try:
         talk = await asyncio.to_thread(lambda: TalkSession(channel).__enter__())
         await ws.send_json({"ok": True, "channel": channel})
         while True:
-            pcm = await ws.receive_bytes()
+            pcm = await asyncio.wait_for(ws.receive_bytes(), _TALK_IDLE)
             if pcm:
+                if not logged:      # log real talking, not a line opened on hover
+                    accesslog.record(accesslog.client(ws), "Talk", _cam(channel))
+                    logged = True
                 alaw = audiogen.pcm16le_to_alaw(pcm)
                 await asyncio.to_thread(talk.send_alaw, alaw, False)
     except WebSocketDisconnect:
         pass
+    except asyncio.TimeoutError:
+        try:
+            await ws.close(code=1000, reason="idle")
+        except RuntimeError:
+            pass
     except (DVRIPError, OSError) as e:
         try:
             await ws.close(code=1011, reason=str(e)[:100])
