@@ -41,6 +41,9 @@ Taken from the running install (3 Nov 2026). Faces are blurred and IPs in the ac
 - **Visitors:** a person detector (YOLOX, CPU) checks every alert, so it finds people from behind, under a hood or carrying a parcel. Alerts within 3 minutes are grouped into one visit with the best shot on top. Click to watch.
 - **Faces:** faces from those frames are grouped by person (YuNet + SFace). Groups of the same person merge automatically; anything left over can be merged by hand with *Merge into*.
 - New alerts are scanned in the background within about 5 minutes, and the last 7 days are kept filled in.
+- Optional: set `UEYE_FACES=0` on the container to turn People off entirely (privacy, CPU). Then OpenCV
+  is not loaded, no model is downloaded, nothing is scanned in the background and the People tab is hidden.
+  Faces and visitor crops saved before are not deleted: remove `/config/faces` to get rid of them.
 
 **Settings**
 - **Health:** each camera (online, recording, bitrate), disks, how many days of footage are kept, NVR model / firmware / uptime, clock, and uEye's own disk use. A two-step *Reboot NVR* button for when the NVR stops serving playback.
@@ -50,6 +53,8 @@ Taken from the running install (3 Nov 2026). Faces are blurred and IPs in the ac
 
 **Behind the scenes**
 - The NVR has no internet (firewalled), so uEye keeps its clock right: checked hourly, corrected when it drifts more than 2 s.
+  It uses the container's local time, so set `TZ` (e.g. `TZ=Europe/Amsterdam`); without it the container
+  runs on UTC and the NVR clock would be moved to UTC.
 - Background work (thumbnails, person and face scans) runs on one low-priority thread, about 1 core at most while busy.
 - Installable as an app on the iPhone home screen (PWA).
 
@@ -129,6 +134,10 @@ config generation and the seasonal sounds.
 
 Note: config shapes like `Detect.MotionDetect` vary by firmware; they're handled
 generically but your box may differ.
+
+The NVR returns at most 64 recordings per search here and uEye pages past that.
+If yours returns fewer per search (a busy day stops early in Recordings), set
+`UEYE_SEARCH_PAGE_CAP` on the container to that number.
 
 ## Layout
 
