@@ -96,3 +96,113 @@ def test_demux_keyframe_cuts_tile_consecutive_chunks():
     assert first + second == whole                 # no gap, no overlap
     assert whole.startswith(b"\x00\x00\x00\x01\x26\x01I\x02")   # first I-frame >= :01
     assert b"I\x06" in whole and b"I\x08" not in whole   # cut before the :08 I-frame
+
+
+def _paged_client(pages):
+    """Client whose _search_page answers from a list of fake NVR pages."""
+    c = DVRIPClient(host="x", port=1, username="u", password="p")
+    calls = []
+
+    def fake(channel, begin, end, stream="Main", filetype="h264"):
+        calls.append(begin)
+        return pages[len(calls) - 1] if len(calls) <= len(pages) else []
+    c._search_page = fake
+    return c, calls
+
+
+def _files(start_min, n):
+    out = []
+    for i in range(start_min, start_min + n):
+        hh, mm = divmod(i, 60)
+        out.append({"FileName": f"/idea0/{i}.h264",
+                    "BeginTime": f"2026-11-19 {hh:02d}:{mm:02d}:00",
+                    "EndTime": f"2026-11-19 {hh:02d}:{mm:02d}:30"})
+    return out
+
+
+DAY = ("2026-11-19 00:00:00", "2026-11-19 23:59:59")
+
+
+def test_search_pages_past_the_cap_and_dedupes():
+    from dvrip import SEARCH_PAGE_CAP
+    p1 = _files(0, SEARCH_PAGE_CAP)
+    p2 = _files(SEARCH_PAGE_CAP - 1, 10)      # the NVR repeats the boundary file
+    c, calls = _paged_client([p1, p2])
+    got = c.search_recordings(0, *DAY)
+    assert len(got) == SEARCH_PAGE_CAP + 9
+    assert len({f["FileName"] for f in got}) == len(got)
+    assert calls == [DAY[0], p1[-1]["BeginTime"]]
+
+
+def test_search_short_page_is_one_query():
+    c, calls = _paged_client([_files(0, 5)])
+    assert len(c.search_recordings(0, *DAY)) == 5
+    assert len(calls) == 1
+
+
+def test_search_stops_when_a_page_brings_nothing_new():
+    from dvrip import SEARCH_PAGE_CAP
+    p = _files(0, SEARCH_PAGE_CAP)
+    c, calls = _paged_client([p, p, p])
+    assert len(c.search_recordings(0, *DAY)) == SEARCH_PAGE_CAP
+    assert len(calls) == 2
+
+
+def _wire_client(reply):
+    """Client with a fake socket whose OPFileQuery answer is `reply`."""
+    class Sock:
+        def sendall(self, _):
+            pass
+    c = DVRIPClient(host="x", port=1, username="u", password="p")
+    c._sock = Sock()
+    c._recv = lambda *a, **k: (1441, reply)
+    return c
+
+
+def test_search_ret_119_means_no_files():
+    assert _wire_client({"Ret": 119}).search_recordings(1, *DAY) == []
+
+
+def test_search_other_errors_still_raise():
+    import pytest
+    from dvrip import DVRIPError
+    with pytest.raises(DVRIPError):
+        _wire_client({"Ret": 103}).search_recordings(1, *DAY)
+
+
+def test_search_long_file_does_not_skip_shorter_ones():
+    """A long file on a full page must not push the cursor past clips that start
+    before it ends (cursor = latest BeginTime, not EndTime)."""
+    from dvrip import SEARCH_PAGE_CAP
+    p1 = _files(0, SEARCH_PAGE_CAP)
+    p1[10] = dict(p1[10], EndTime="2026-11-19 23:00:00")   # a long continuous file
+    c, calls = _paged_client([p1, _files(SEARCH_PAGE_CAP - 1, 3)])
+    c.search_recordings(0, *DAY)
+    assert calls[1] == p1[-1]["BeginTime"]
+
+
+def test_search_keeps_partial_list_when_a_later_page_fails():
+    from dvrip import SEARCH_PAGE_CAP, DVRIPError
+    p1 = _files(0, SEARCH_PAGE_CAP)
+    c = DVRIPClient(host="x", port=1, username="u", password="p")
+    answers = iter([p1])
+
+    def fake(*a, **k):
+        try:
+            return next(answers)
+        except StopIteration:
+            raise DVRIPError("file search failed: Ret=108")
+    c._search_page = fake
+    assert len(c.search_recordings(0, *DAY)) == SEARCH_PAGE_CAP
+
+
+def test_search_first_page_error_still_raises():
+    import pytest
+    from dvrip import DVRIPError
+    c = DVRIPClient(host="x", port=1, username="u", password="p")
+
+    def fake(*a, **k):
+        raise DVRIPError("file search failed: Ret=103")
+    c._search_page = fake
+    with pytest.raises(DVRIPError):
+        c.search_recordings(0, *DAY)
