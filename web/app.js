@@ -1586,6 +1586,10 @@ async function boot() {
   try {
     const h = await api('/health');
     CHANNELS = h.channels;
+    // People starts hidden (no flash while /health loads); show it only when the
+    // face stack is on, otherwise drop it (UEYE_FACES=0 or CV stack missing).
+    if (h.faces) $('[data-view="people"]').classList.remove('hidden');
+    else $$('[data-view="people"], #people').forEach(el => el.remove());
     setStatus(`NVR ${h.nvr}`);
   } catch (e) {
     setStatus('Cannot reach backend: ' + e.message);

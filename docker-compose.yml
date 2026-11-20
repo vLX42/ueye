@@ -7,6 +7,9 @@ services:
     ports:
       - "8080:8080"       # web UI  ->  http://<nas-ip>:8080
       - "8555:8555"       # WebRTC (optional, lower-latency live); MSE works without it
+    # environment:
+    #   TZ: Europe/Amsterdam    # SET THIS to your time zone: uEye sets the NVR clock from it
+    #   UEYE_FACES: "0"        # turn off the People view (no face/person scanning, no model downloads)
     volumes:
       - ./config.yaml:/config/config.yaml:ro
     # The NVR is reached on your LAN; no special network mode needed as long as
