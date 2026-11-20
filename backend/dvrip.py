@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
 import struct
 import threading
@@ -23,6 +24,29 @@ from typing import Any
 
 # --- message ids (QCODES) we actually use -----------------------------------
 LOGIN_REQ = 1000
+# OPFileQuery: the NVR returns at most this many files per query (64 on a
+# Xiongmai NBD80S16S-KL) and answers Ret 119 when the range has no files.
+# The reply carries no "truncated" flag (Ret 100 either way), so a page this
+# size is taken as full. Firmwares with a smaller cap: set UEYE_SEARCH_PAGE_CAP.
+# A bigger page than the cap raises it for the rest of the run.
+def _env_page_cap(default: int = 64) -> int:
+    raw = os.environ.get("UEYE_SEARCH_PAGE_CAP", "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+        if v >= 1:
+            return v
+    except ValueError:
+        pass
+    print(f"[search] UEYE_SEARCH_PAGE_CAP={raw!r} is not a positive number, using {default}", flush=True)
+    return default
+
+
+SEARCH_PAGE_CAP = _env_page_cap()
+_page_cap = SEARCH_PAGE_CAP            # learned: grows if the NVR sends more
+SEARCH_MAX_PAGES = 50
+RET_NO_FILES = 119
 LOGIN_RSP = 1000
 LOGOUT_REQ = 1001
 KEEPALIVE_REQ = 1006
@@ -242,10 +266,55 @@ class DVRIPClient:
         self, channel: int, begin: str, end: str,
         stream: str = "Main", filetype: str = "h264",
     ) -> list[dict[str, Any]]:
-        """List recordings in [begin, end] (strings 'YYYY-MM-DD HH:MM:SS').
+        """List ALL recordings in [begin, end] (strings 'YYYY-MM-DD HH:MM:SS').
+
+        The NVR returns at most a page of files per OPFileQuery (SEARCH_PAGE_CAP,
+        raised if a bigger page is ever seen), even for a
+        single day: a camera recording short motion clips easily has 150+ files a
+        day. When a page comes back full, ask again from the latest BeginTime on
+        it (not EndTime: a long file would make us skip shorter ones that start
+        before it ends) and drop the repeats by file name. If a later page fails,
+        the files already listed are returned rather than losing the whole range.
+        """
+        out: list[dict[str, Any]] = []
+        seen: set = set()
+        cursor = begin
+        for n in range(SEARCH_MAX_PAGES):
+            try:
+                page = self._search_page(channel, cursor, end, stream, filetype)
+            except DVRIPError as e:
+                if n == 0:
+                    raise
+                print(f"[search] channel {channel}: page {n + 1} failed ({e}); "
+                      f"returning the {len(out)} files listed so far", flush=True)
+                break
+            new = [f for f in page if f.get("FileName") not in seen]
+            seen.update(f.get("FileName") for f in new)
+            out += new
+            global _page_cap
+            if len(page) > _page_cap:
+                _page_cap = len(page)
+            if len(page) < _page_cap or not new:
+                break
+            nxt = max(str(f.get("BeginTime", "")) for f in page)
+            if nxt <= cursor:
+                break
+            cursor = nxt
+        else:
+            print(f"[search] channel {channel}: stopped after {SEARCH_MAX_PAGES} pages, "
+                  f"the list may be incomplete", flush=True)
+        return out
+
+    def _search_page(
+        self, channel: int, begin: str, end: str,
+        stream: str = "Main", filetype: str = "h264",
+    ) -> list[dict[str, Any]]:
+        """One OPFileQuery round trip (at most SEARCH_PAGE_CAP files).
 
         The file list arrives in a follow-up 1441 packet, not the request ack,
         so we read until we see the OPFileQuery array (or an error Ret).
+        Ret 119 means "no files in that range" (e.g. a camera that recorded
+        nothing that day): an empty result, not an error.
         `stream` is a label kept for the API; the wire StreamType is a mask.
         """
         stream_mask = "0x00000001" if stream.lower() == "sub" else "0x00000000"
@@ -268,6 +337,8 @@ class DVRIPClient:
                 if isinstance(files, list):
                     return files
                 ret = data.get("Ret")
+                if ret == RET_NO_FILES:
+                    return []
                 if ret not in (100, None):
                     raise DVRIPError(f"file search failed: Ret={ret}")
             return []

@@ -39,7 +39,17 @@ import pause  # noqa: E402
 
 # Face sorting is optional: if the CV stack isn't installed the rest of the API
 # still works and the face endpoints report unavailable.
+# UEYE_FACES=0 turns it off on purpose (privacy, CPU): no OpenCV import, no model
+# downloads, no background face/person scan; the People view reports it disabled.
+# Privacy switch fails closed: only an explicit yes (or unset) keeps it on, so a
+# typo such as UEYE_FACES=disabled turns it off instead of silently on.
+_faces_env = os.environ.get("UEYE_FACES", "1").strip().lower()
+FACES_ENABLED = _faces_env in ("1", "true", "yes", "on")
+if _faces_env not in ("1", "true", "yes", "on", "0", "false", "no", "off"):
+    print(f"[faces] UEYE_FACES={_faces_env!r} not understood: face scanning is OFF", flush=True)
 try:
+    if not FACES_ENABLED:
+        raise RuntimeError("disabled by UEYE_FACES=0")
     import numpy as np  # noqa: E402
     import cv2  # noqa: E402
     import faces as faceslib  # noqa: E402
@@ -55,6 +65,10 @@ try:
 except Exception as _face_err:  # pragma: no cover
     FACES_OK = False
     _FACE_IMPORT_ERR = str(_face_err)
+    _face_dir = Path(os.environ.get("FACE_DB", "/config/faces/faces.db")).parent
+    if not FACES_ENABLED and _face_dir.exists():
+        print(f"[faces] off, but face/visitor data from earlier runs is still in {_face_dir}; "
+              "delete that folder to remove it", flush=True)
 
 app = FastAPI(title="uEye", version="0.1.0")
 app.include_router(auth.router)
@@ -523,7 +537,8 @@ def nvr_time():
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "nvr": f"{CFG.host}:{CFG.port}",
-            "channels": [{"id": c.id, "name": c.name} for c in CFG.channels]}
+            "channels": [{"id": c.id, "name": c.name} for c in CFG.channels],
+            "faces": FACES_OK}
 
 
 # --- health: NVR disk, retention, cameras, clock + NAS-side usage -----------
@@ -559,9 +574,9 @@ def _nvr_health() -> dict[str, Any]:
         disks.append({"total_mb": total, "free_mb": free,
                       "ok": all(int(p.get("Status", 0)) == 0 for p in parts),
                       "oldest": min(starts) if starts else None, "newest": max(ends) if ends else None})
-    link = int(str(chstat.get("ChnLinkStatus", "0")), 16)
-    loss = int((work.get("AlarmState") or {}).get("VideoLoss", 0))
-    blind = int((work.get("AlarmState") or {}).get("VideoBlind", 0))
+    link = _bitmask(chstat.get("ChnLinkStatus", 0))
+    loss = _bitmask((work.get("AlarmState") or {}).get("VideoLoss", 0))
+    blind = _bitmask((work.get("AlarmState") or {}).get("VideoBlind", 0))
     states = work.get("ChannelState") or []
     cams = []
     for ch in CFG.channels:
@@ -578,6 +593,19 @@ def _nvr_health() -> dict[str, Any]:
         "retention_days": round((datetime.now() - datetime.strptime(oldest, _FMT)).total_seconds() / 86400, 1) if oldest else None,
         "cameras": cams,
     }
+
+
+def _bitmask(v) -> int:
+    """Per-channel bit mask from WorkState. Firmwares send a number (2) or a hex
+    string, with or without 0x ("0x00000002", "00000002", "ff")."""
+    if isinstance(v, int):
+        return v
+    s = str(v or "").strip()
+    try:
+        return int(s, 16) if s else 0
+    except ValueError:
+        print(f"[health] unreadable channel mask {v!r}, treating as 0", flush=True)
+        return 0
 
 
 @app.get("/api/health/status")
@@ -677,8 +705,8 @@ def recordings(
     with nvr() as conn:
         for ch in chans:
             for day in day_list:
-                # query one day at a time: the NVR caps results per OPFileQuery,
-                # so a wide range would truncate. Per-day stays under the cap.
+                # one day at a time keeps each listing small; search_recordings
+                # pages past the NVR's per-query cap when a day has more files.
                 b, e = f"{day} 00:00:00", f"{day} 23:59:59"
                 try:
                     for f in conn.search_recordings(ch, b, e, stream=stream):

@@ -1586,6 +1586,8 @@ async function boot() {
   try {
     const h = await api('/health');
     CHANNELS = h.channels;
+    // People off (UEYE_FACES=0 or CV stack missing): hide it instead of showing it broken
+    if (h.faces === false) $$('[data-view="people"], #people').forEach(el => el.remove());
     setStatus(`NVR ${h.nvr}`);
   } catch (e) {
     setStatus('Cannot reach backend: ' + e.message);
